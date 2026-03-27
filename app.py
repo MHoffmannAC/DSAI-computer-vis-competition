@@ -416,7 +416,7 @@ def main() -> None:
                         tmpf.write(uploaded_file.read())
                         tmpf.flush()
                         try:
-                            model = tf.keras.models.load_model(tmpf.name)
+                            model = tf.keras.models.load_model(tmpf.name, safe_mode=False)
                             input_shape = model.input_shape
                             if len(input_shape) == 4 and input_shape[-1] == 3:
                                 input_size = (input_shape[1], input_shape[2])
