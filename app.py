@@ -542,13 +542,14 @@ def main() -> None:
                                         for img in raw_images
                                     ]
                                     x = np.stack(resized_imgs)
+                                    x = x.astype("float32")
+
                                     if apply_preprocess:
                                         if model_type == "Custom":
-                                            x = x.astype("float32") / 255.0
+                                            x = x / 255.0
                                         else:
-                                            x = model_map[model_type].preprocess_input(
-                                                x,
-                                            )
+                                            x = model_map[model_type].preprocess_input(x)
+
                                     acc, y_pred = evaluate_model(
                                         model,
                                         x,
