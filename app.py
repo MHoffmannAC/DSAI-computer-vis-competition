@@ -307,7 +307,8 @@ def evaluate_model(
     x: np.ndarray,
     y: np.ndarray,
 ) -> tuple[float, np.ndarray]:
-    preds = model(x, training=False).numpy()
+
+    preds = model.predict(x)
     y_pred = np.argmax(preds, axis=1)
     return (y_pred == y).mean(), y_pred
 
