@@ -1,20 +1,79 @@
 import tempfile
 from pathlib import Path
 
+import altair as alt
 import gspread
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import streamlit as st
 import tensorflow as tf
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
 from PIL import Image
+from sklearn.metrics import confusion_matrix
 from streamlit_gsheets import GSheetsConnection
+from tensorflow.keras.applications import (
+    convnext,
+    densenet,
+    efficientnet,
+    efficientnet_v2,
+    inception_resnet_v2,
+    inception_v3,
+    mobilenet_v2,
+    mobilenet_v3,
+    nasnet,
+    resnet,
+    resnet_v2,
+    vgg16,
+    vgg19,
+    xception,
+)
+
+model_map = {
+    "Custom": "custom",
+    "ConvNeXt": convnext,
+    "DenseNet": densenet,
+    "EfficientNet": efficientnet,
+    "EfficientNetV2": efficientnet_v2,
+    "InceptionV3": inception_v3,
+    "InceptionResNetV2": inception_resnet_v2,
+    "MobileNetV2": mobilenet_v2,
+    "MobileNetV3": mobilenet_v3,
+    "NASNet": nasnet,
+    "ResNet": resnet,
+    "ResNetV2": resnet_v2,
+    "VGG16": vgg16,
+    "VGG19": vgg19,
+    "Xception": xception,
+}
 
 # ==== CONFIGURATION & CONSTANTS ====
 TEST_IMAGE_DIR = "test_images"
 CLASS_NAMES = ["A", "B", "C"]
-REQUIRED_COLUMNS = ["participant", "accuracy", "submission_time", "batch"]
+REQUIRED_COLUMNS = ["participant", "accuracy", "submission_time", "batch", "model_type"]
+
+
+help_leaderboard_toggle = """By default, the leaderboard displays one entry per participant and model type.\n\n
+Toggle if you prefer to see only one entry per participant.
+"""
+
+help_model_selection = """Please select your used model.\n\n
+Select the model family in case you used transfer learning or select "Custom" otherwise.\n\n
+The app uses this information to handle preprocessing as well as for leaderboard purposes.
+"""
+
+help_preprocessing = """Select whether or not your model is performing
+the necessary preprocessing steps on its own.\n
+If you select `Yes`, the app assumes your pipeline includes either
+- a normal rescaling layer or
+- a keras preprocessing layer of the format
+`preprocessor = Lambda(_________.preprocess_input)`\n
+If you select `No`, the app will apply
+- rescaling to [0,1] in case of custom models
+- the model family's own preprocessor for pre-trained models
+"""
 
 # ==== GLOBAL STORE & STATE ====
 
@@ -88,7 +147,7 @@ def get_gsheet_connection() -> GSheetsConnection:
 
 
 @st.cache_resource
-def configure_gsheet(batch: str | None = None, _store: dict | None = None) -> str:
+def configure_gsheet(_store: dict, batch: str | None = None) -> str:
     """Configures the GSheet connection and ensures specific worksheets exist."""
     try:
         if _store["gsheet_conn"] is None:
@@ -147,33 +206,29 @@ def ensure_batch_sheet_exists(batch: str, conn: GSheetsConnection) -> None:
 
 
 def generate_leaderboard_dataframe(
-    submissions_df: pd.DataFrame, *, show_best_only: bool = True,
+    submissions_df: pd.DataFrame,
+    *,
+    reduce_leaderboard: bool,
 ) -> pd.DataFrame:
     """Processes submission data into a leaderboard format."""
     if submissions_df.empty:
         return pd.DataFrame()
 
-    if show_best_only:
-        df = (
-            submissions_df.assign(
-                attempts=lambda df_: df_.groupby("participant")[
-                    "participant"
-                ].transform("count"),
-            )
-            .sort_values(["accuracy", "submission_time"], ascending=[False, True])
-            .drop_duplicates(subset=["participant"], keep="first")
-            .assign(position=lambda df_: range(1, len(df_) + 1))
-            .set_index("position")
-            .filter(["participant", "accuracy", "attempts", "batch"])
-        )
+    if reduce_leaderboard:
+        groupby = ["participant", "batch"]
     else:
-        df = (
-            submissions_df.sort_values("submission_time", ascending=False)
-            .assign(position=lambda df_: range(1, len(df_) + 1))
-            .set_index("position")
-            .filter(["participant", "accuracy", "submission_time", "batch"])
+        groupby = ["participant", "batch", "model_type"]
+
+    return (
+        submissions_df.assign(
+            attempts=lambda df_: df_.groupby(groupby)["participant"].transform("count"),
         )
-    return df
+        .sort_values(["accuracy", "submission_time"], ascending=[False, True])
+        .drop_duplicates(subset=groupby, keep="first")
+        .assign(position=lambda df_: range(1, len(df_) + 1))
+        .set_index("position")
+        .filter(["participant", "batch", "model_type", "accuracy", "attempts"])
+    )
 
 
 def build_leaderboards() -> None:
@@ -181,7 +236,10 @@ def build_leaderboards() -> None:
     store = get_global_store()
     for batch, df in store["submissions"].items():
         if batch != "anonymous" and df is not None and not df.empty:
-            store["leaderboards"][batch] = generate_leaderboard_dataframe(df)
+            store["leaderboards"][batch] = generate_leaderboard_dataframe(
+                df,
+                reduce_leaderboard=False,
+            )
         else:
             store["leaderboards"][batch] = pd.DataFrame()
 
@@ -191,6 +249,7 @@ def build_leaderboards() -> None:
     ):
         store["alltime_leaderboard"] = generate_leaderboard_dataframe(
             store["alltime_submissions"],
+            reduce_leaderboard=False,
         )
 
 
@@ -243,12 +302,14 @@ def load_raw_test_images() -> tuple[list[Image.Image], np.ndarray]:
     return images, np.array(labels)
 
 
-def evaluate_model(model, pil_images, y, input_size) -> float:
-    resized_imgs = [np.array(img.resize(input_size)) for img in pil_images]
-    x = np.stack(resized_imgs)
-    preds = model.predict(x)
+def evaluate_model(
+    model: tf.keras.Model,
+    x: np.ndarray,
+    y: np.ndarray,
+) -> tuple[float, np.ndarray]:
+    preds = model(x, training=False).numpy()
     y_pred = np.argmax(preds, axis=1)
-    return (y_pred == y).mean()
+    return (y_pred == y).mean(), y_pred
 
 
 # ==== UI COMPONENTS ====
@@ -262,7 +323,7 @@ def get_participant_info() -> None:
         # Check if we need to load the submissions for chart plotting/recording
         if st.session_state.batch not in store["submissions"]:
             try:
-                configure_gsheet(st.session_state.batch, _store=store)
+                configure_gsheet(_store=store, batch = st.session_state.batch)
                 store["submissions"][st.session_state.batch] = store[
                     "gsheet_conn"
                 ].read(worksheet=st.session_state.batch, ttl=0)
@@ -272,7 +333,7 @@ def get_participant_info() -> None:
                 st.stop()
 
         st.info(
-            f"Logged in as: **{st.session_state.user_name}** | Batch: **{st.session_state.batch}**",
+            f"Logged in as: **{st.session_state.user_name}** from **{st.session_state.batch}**",
         )
 
     else:
@@ -320,7 +381,7 @@ def plot_submissions(participant_name: str) -> None:
     participant_submissions = (
         store["submissions"][batch]
         .query("participant == @participant_name")
-        .filter(["submission_time", "accuracy"])
+        .filter(["model_type", "submission_time", "accuracy"])
         .copy()
     )
 
@@ -333,8 +394,32 @@ def plot_submissions(participant_name: str) -> None:
         )
         participant_submissions = participant_submissions.sort_values(
             "submission_time",
-        ).set_index("submission_time")
-        st.line_chart(participant_submissions)
+        )  # .set_index("submission_time")
+        line = (
+            alt.Chart(participant_submissions)
+            .mark_line()
+            .encode(
+                x="submission_time:T",
+                y="accuracy:Q",
+            )
+        )
+
+        # Large colored points on top of the line
+        points = (
+            alt.Chart(participant_submissions)
+            .mark_point(filled=True, size=150)  # size controls how big the dots are
+            .encode(
+                x="submission_time:T",
+                y="accuracy:Q",
+                color="model_type:N",
+                tooltip=["submission_time:T", "model_type:N", "accuracy:Q"],
+            )
+        )
+
+        # Layer line + points
+        chart = alt.layer(line, points).interactive()
+
+        st.altair_chart(chart, width="stretch")
     elif len(participant_submissions):
         st.success(
             "First submission recorded! Submit more models to see your progress chart.",
@@ -346,7 +431,7 @@ def show_leaderboard() -> None:
     """Displays the interactive leaderboard with toggle logic."""
     if st.session_state.batch == "anonymous":
         st.info(
-            "You are currently in an anonymous session. Your results are being recorded for instructors, but you won't see or appear on any public leaderboards.",
+            "You are currently in an anonymous session. You won't see or appear on any public leaderboards.",
         )
         return
 
@@ -359,15 +444,17 @@ def show_leaderboard() -> None:
     submissions_df = store["submissions"].get(batch, pd.DataFrame())
 
     if not submissions_df.empty:
-        show_best = st.toggle(
-            "Only show best attempt per user",
-            value=True,
-            key="batch_toggle",
+        reduce_leaderboard = st.toggle(
+            "Reduce leaderboard to one entry per participant?",
+            help=help_leaderboard_toggle,
         )
-        view = generate_leaderboard_dataframe(submissions_df, show_best_only=show_best)
+        view = generate_leaderboard_dataframe(
+            submissions_df,
+            reduce_leaderboard=reduce_leaderboard,
+        )
         st.dataframe(
             view.drop("batch", axis=1, errors="ignore"),
-            use_container_width=True,
+            width="stretch",
         )
     else:
         st.write("No submissions yet for this batch.")
@@ -379,16 +466,15 @@ def show_leaderboard() -> None:
     ):
         st.divider()
         st.header("👑 All-time Global Leaderboard", anchor=False)
-        at_show_best = st.toggle(
-            "Only show best attempt per user",
-            value=True,
-            key="at_toggle",
+        reduce_leaderboard = st.toggle(
+            "Reduce all-time leaderboard to one entry per participant?",
+            help=help_leaderboard_toggle,
         )
         at_view = generate_leaderboard_dataframe(
             store["alltime_submissions"],
-            show_best_only=at_show_best,
+            reduce_leaderboard=reduce_leaderboard,
         )
-        st.dataframe(at_view, use_container_width=True)
+        st.dataframe(at_view, width="stretch")
 
 
 # ==== MAIN ====
@@ -396,7 +482,8 @@ def show_leaderboard() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Sign Language Showdown", page_icon="✊")
-    st.title("Sign Language Model Showdown! ✊🖐️🤏", anchor=False)
+    st.title("Sign Language Model Showdown!", anchor=False, text_alignment="center")
+    st.title("✊🖐️🤏", anchor=False, text_alignment="center")
 
     state_inits()
     get_participant_info()
@@ -405,46 +492,110 @@ def main() -> None:
         st.subheader("📤 Submit Your Model", anchor=False)
         uploaded_file = st.file_uploader("Select a Keras model file", type=["keras"])
 
-        if uploaded_file:  # noqa: SIM102
-            if st.button("Evaluate Model", type="primary"):
-                raw_images, y_test = load_raw_test_images()
-                with st.spinner("Analyzing model performance..."):
-                    with tempfile.NamedTemporaryFile(
-                        suffix=".keras",
-                        delete=True,
-                    ) as tmpf:
-                        tmpf.write(uploaded_file.read())
-                        tmpf.flush()
-                        try:
-                            model = tf.keras.models.load_model(tmpf.name, safe_mode=False)
-                            input_shape = model.input_shape
-                            if len(input_shape) == 4 and input_shape[-1] == 3:
-                                input_size = (input_shape[1], input_shape[2])
-                                acc = evaluate_model(
-                                    model,
-                                    raw_images,
-                                    y_test,
-                                    input_size,
-                                )
-
-                                result = pd.DataFrame(
-                                    [
-                                        {
-                                            "accuracy": round(acc, 4),
-                                            "participant": st.session_state.user_name,
-                                            "batch": st.session_state.batch,
-                                            "submission_time": pd.Timestamp.now().isoformat(),
+        if uploaded_file:
+            cols = st.columns(
+                2,
+                gap="large",
+            )
+            with cols[0]:
+                model_type = st.selectbox(
+                    "Select model type:",
+                    model_map.keys(),
+                    index=None,
+                    help=help_model_selection,
+                )
+            with cols[1]:
+                apply_preprocess = st.radio(
+                    "Does your model handle preprocessing?",
+                    options=["Yes", "No"],
+                    index=0,
+                    help=help_preprocessing,
+                )
+            if model_type:  # noqa: SIM102
+                if st.button("Evaluate Model", type="primary"):
+                    raw_images, y_test = load_raw_test_images()
+                    with st.spinner("Analyzing model performance..."):  # noqa: SIM117
+                        with tempfile.NamedTemporaryFile(
+                            suffix=".keras",
+                            delete=True,
+                        ) as tmpf:
+                            tmpf.write(uploaded_file.read())
+                            tmpf.flush()
+                            try:
+                                if model_type == "Custom":
+                                    model = tf.keras.models.load_model(tmpf.name)
+                                else:
+                                    model = tf.keras.models.load_model(
+                                        tmpf.name,
+                                        custom_objects={
+                                            "preprocess_input": model_map[
+                                                model_type
+                                            ].preprocess_input,
                                         },
-                                    ],
-                                )
+                                    )
+                                input_shape = model.input_shape
+                                if len(input_shape) == 4 and input_shape[-1] == 3:
+                                    input_size = (input_shape[1], input_shape[2])
+                                    resized_imgs = [
+                                        np.array(img.resize(input_size))
+                                        for img in raw_images
+                                    ]
+                                    x = np.stack(resized_imgs)
+                                    if apply_preprocess:
+                                        if model_type == "Custom":
+                                            x = x.astype("float32") / 255.0
+                                        else:
+                                            x = model_map[model_type].preprocess_input(
+                                                x,
+                                            )
+                                    acc, y_pred = evaluate_model(
+                                        model,
+                                        x,
+                                        y_test,
+                                    )
 
-                                # Recording now happens for everyone, including anonymous
-                                update_submissions(result)
-                                st.success(f"Success! Model Accuracy: {acc:.2%}")
-                            else:
-                                st.error("Incompatible model shape.")
-                        except Exception as e:
-                            st.error(f"Error evaluating model: {e}")
+                                    result = pd.DataFrame(
+                                        [
+                                            {
+                                                "accuracy": round(acc, 4),
+                                                "participant": st.session_state.user_name,
+                                                "batch": st.session_state.batch,
+                                                "submission_time": pd.Timestamp.now().isoformat(),
+                                                "model_type": model_type,
+                                            },
+                                        ],
+                                    )
+
+                                    update_submissions(result)
+                                    st.success(f"Success! Model Accuracy: {acc:.2%}")
+                                    st.subheader("🧮 Confusion Matrix")
+                                    fig, ax = plt.subplots(
+                                        figsize=(2, 2), facecolor="black",
+                                    )
+                                    cm = confusion_matrix(y_test, y_pred)
+                                    sns.heatmap(
+                                        cm,
+                                        annot=True,
+                                        fmt="d",
+                                        cmap="copper",
+                                        xticklabels=CLASS_NAMES,
+                                        yticklabels=CLASS_NAMES,
+                                        ax=ax,
+                                        cbar=False,
+                                        annot_kws={"color": "white", "fontsize": 8},
+                                    )
+                                    ax.set_xlabel("Predicted", color="white")
+                                    ax.set_ylabel("True Label", color="white")
+                                    ax.tick_params(colors="white", labelsize=8)
+                                    ax.tick_params(
+                                        which="both",
+                                        length=0,
+                                    )
+                                    st.pyplot(fig, width="content")
+                                else:
+                                    st.error("Incompatible model shape.")
+                            except Exception as e:
+                                st.error(f"Error evaluating model: {e}")
 
         plot_submissions(st.session_state.user_name)
         show_leaderboard()

@@ -1,5 +1,9 @@
-streamlit
-st-gsheets-connection
-tensorflow
-pillow
+altair
+matplotlib
 pandas
+pillow
+scikit-learn
+seaborn
+st-gsheets-connection
+streamlit
+tensorflow
