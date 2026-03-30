@@ -6,4 +6,4 @@ scikit-learn
 seaborn
 st-gsheets-connection
 streamlit
-tensorflow
+tensorflow-cpu
