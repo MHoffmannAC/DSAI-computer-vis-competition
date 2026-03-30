@@ -511,7 +511,7 @@ def main() -> None:
                     options=["Yes", "No"],
                     index=0,
                     help=help_preprocessing,
-                )
+                ) == "No"
             if model_type:  # noqa: SIM102
                 if st.button("Evaluate Model", type="primary"):
                     raw_images, y_test = load_raw_test_images()
