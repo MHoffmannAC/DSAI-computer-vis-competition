@@ -281,25 +281,104 @@ def update_submissions(participant_results: pd.DataFrame) -> None:
 
 # ==== MODEL EVALUATION ====
 
-
-@st.cache_data(show_spinner="Loading test set...")
-def load_raw_test_images() -> tuple[list[Image.Image], np.ndarray]:
-    images, labels = [], []
+def iter_test_image_paths():
     base_dir = Path(TEST_IMAGE_DIR)
 
     for idx, cls in enumerate(CLASS_NAMES):
         folder = base_dir / cls
         if not folder.exists():
             continue
+
         for fpath in sorted(folder.iterdir()):
-            if not fpath.is_file():
-                continue
+            if fpath.is_file():
+                yield fpath, idx
 
-            img = Image.open(fpath).convert("RGB")
-            images.append(img)
-            labels.append(idx)
 
-    return images, np.array(labels)
+def generate_augmented_images(img: Image.Image):
+    flip_variants = [
+        img,
+        img.transpose(Image.Transpose.FLIP_LEFT_RIGHT),
+        img.transpose(Image.Transpose.FLIP_TOP_BOTTOM),
+        img.transpose(Image.Transpose.FLIP_LEFT_RIGHT).transpose(
+            Image.Transpose.FLIP_TOP_BOTTOM
+        ),
+    ]
+
+    def zoom_in(im, factor=1.1):
+        w, h = im.size
+        new_w, new_h = int(w / factor), int(h / factor)
+        left = (w - new_w) // 2
+        top = (h - new_h) // 2
+        cropped = im.crop((left, top, left + new_w, top + new_h))
+        return cropped.resize((w, h), Image.BICUBIC)
+
+    def zoom_out(im, factor=0.9):
+        w, h = im.size
+        new_w, new_h = int(w * factor), int(h * factor)
+        resized = im.resize((new_w, new_h), Image.BICUBIC)
+        canvas = Image.new("RGB", (w, h))
+        canvas.paste(resized, ((w - new_w) // 2, (h - new_h) // 2))
+        return canvas
+
+    for fimg in flip_variants:
+        yield fimg
+        yield zoom_in(fimg)
+        yield zoom_out(fimg)
+
+
+def evaluate_model_streaming(
+    model: tf.keras.Model,
+    input_size: tuple[int, int],
+    model_type: str,
+    apply_preprocess: bool,
+):
+    paths = list(iter_test_image_paths())
+    total = len(paths)
+
+    y_true = []
+    y_pred = []
+
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    correct = 0
+
+    for i, (fpath, label) in enumerate(paths):
+        img = Image.open(fpath).convert("RGB")
+
+        batch = []
+        for aug_img in generate_augmented_images(img):
+            arr = np.array(aug_img.resize(input_size)).astype("float32")
+
+            if apply_preprocess:
+                if model_type == "Custom":
+                    arr /= 255.0
+                else:
+                    arr = model_map[model_type].preprocess_input(arr)
+
+            batch.append(arr)
+
+        batch = np.stack(batch)  # shape (12, H, W, 3)
+
+        preds = model.predict(batch, verbose=0)
+        avg_pred = np.mean(preds, axis=0)
+
+        pred_class = np.argmax(avg_pred)
+
+        y_true.append(label)
+        y_pred.append(pred_class)
+
+        if pred_class == label:
+            correct += 1
+
+        current_acc = correct / (i + 1)
+
+        progress_bar.progress((i + 1) / total)
+        status_text.text(
+            f"Processed {i+1}/{total} images — Current Accuracy: {current_acc:.2%}"
+        )
+
+    return current_acc, np.array(y_pred), np.array(y_true)
 
 
 def evaluate_model(
@@ -514,13 +593,12 @@ def main() -> None:
                 ) == "No"
             if model_type:  # noqa: SIM102
                 if st.button("Evaluate Model", type="primary"):
-                    raw_images, y_test = load_raw_test_images()
                     with st.spinner("Analyzing model performance..."):  # noqa: SIM117
                         with tempfile.NamedTemporaryFile(
                             suffix=".keras",
                             delete=True,
                         ) as tmpf:
-                            tmpf.write(uploaded_file.read())
+                            tmpf.write(uploaded_file.getbuffer())
                             tmpf.flush()
                             try:
                                 if model_type == "Custom":
@@ -537,23 +615,12 @@ def main() -> None:
                                 input_shape = model.input_shape
                                 if len(input_shape) == 4 and input_shape[-1] == 3:
                                     input_size = (input_shape[1], input_shape[2])
-                                    resized_imgs = [
-                                        np.array(img.resize(input_size))
-                                        for img in raw_images
-                                    ]
-                                    x = np.stack(resized_imgs)
-                                    x = x.astype("float32")
 
-                                    if apply_preprocess:
-                                        if model_type == "Custom":
-                                            x = x / 255.0
-                                        else:
-                                            x = model_map[model_type].preprocess_input(x)
-
-                                    acc, y_pred = evaluate_model(
+                                    acc, y_pred, y_test = evaluate_model_streaming(
                                         model,
-                                        x,
-                                        y_test,
+                                        input_size,
+                                        model_type,
+                                        apply_preprocess,
                                     )
 
                                     result = pd.DataFrame(
@@ -596,6 +663,9 @@ def main() -> None:
                                     st.pyplot(fig, width="content")
                                 else:
                                     st.error("Incompatible model shape.")
+
+                                del model
+                                tf.keras.backend.clear_session()
                             except Exception as e:
                                 st.error(f"Error evaluating model: {e}")
 
