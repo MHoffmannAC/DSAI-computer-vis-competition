@@ -342,6 +342,7 @@ def evaluate_model_streaming(
     status_text = st.empty()
 
     correct = 0
+    total_preds = 0
 
     for i, (fpath, label) in enumerate(paths):
         img = Image.open(fpath).convert("RGB")
@@ -361,21 +362,23 @@ def evaluate_model_streaming(
         batch = np.stack(batch)  # shape (12, H, W, 3)
 
         preds = model.predict(batch, verbose=0)
-        avg_pred = np.mean(preds, axis=0)
 
-        pred_class = np.argmax(avg_pred)
+        for p in preds:
+            pred_class = np.argmax(p)
 
-        y_true.append(label)
-        y_pred.append(pred_class)
+            y_true.append(label)
+            y_pred.append(pred_class)
 
-        if pred_class == label:
-            correct += 1
+            if pred_class == label:
+                correct += 1
 
-        current_acc = correct / (i + 1)
+            total_preds += 1
+
+        current_acc = correct / total_preds
 
         progress_bar.progress((i + 1) / total)
         status_text.text(
-            f"Processed {i+1}/{total} images — Current Accuracy: {current_acc:.2%}"
+            f"Processed {12*(i+1)}/{12*total} images — Current Accuracy: {current_acc:.2%}"
         )
 
     return current_acc, np.array(y_pred), np.array(y_true)
