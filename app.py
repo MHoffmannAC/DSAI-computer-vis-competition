@@ -632,6 +632,10 @@ def verify_architecture(model, selected_model_name: str) -> bool:
 
 def main() -> None:
     st.set_page_config(page_title="Sign Language Showdown", page_icon="✊")
+
+    if st.session_state.batch == "Instructor":
+        display_admin()
+
     st.title("Sign Language Model Showdown!", anchor=False, text_alignment="center")
     st.title("✊🖐️🤏", anchor=False, text_alignment="center")
 
@@ -774,9 +778,6 @@ def main() -> None:
 
         plot_submissions(st.session_state.user_name)
         show_leaderboard()
-
-        if st.session_state.batch == "Instructor":
-            display_admin()
 
 
 if __name__ == "__main__":
