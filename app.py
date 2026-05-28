@@ -633,7 +633,7 @@ def verify_architecture(model, selected_model_name: str) -> bool:
 def main() -> None:
     st.set_page_config(page_title="Sign Language Showdown", page_icon="✊")
 
-    if st.session_state.batch == "Instructor":
+    if st.session_state.get("batch") == "Instructor":
         display_admin()
 
     st.title("Sign Language Model Showdown!", anchor=False, text_alignment="center")
