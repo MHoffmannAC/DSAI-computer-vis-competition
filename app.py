@@ -1,4 +1,7 @@
 import tempfile
+import time
+import re
+import gc
 from pathlib import Path
 
 import altair as alt
@@ -15,12 +18,12 @@ from PIL import Image
 from sklearn.metrics import confusion_matrix
 from streamlit_gsheets import GSheetsConnection
 from tensorflow.keras.applications import (
-    convnext,
     densenet,
     efficientnet,
     efficientnet_v2,
     inception_resnet_v2,
     inception_v3,
+    mobilenet,
     mobilenet_v2,
     mobilenet_v3,
     nasnet,
@@ -31,22 +34,40 @@ from tensorflow.keras.applications import (
     xception,
 )
 
-model_map = {
-    "Custom": "custom",
-    "ConvNeXt": convnext,
-    "DenseNet": densenet,
-    "EfficientNet": efficientnet,
-    "EfficientNetV2": efficientnet_v2,
-    "InceptionV3": inception_v3,
-    "InceptionResNetV2": inception_resnet_v2,
-    "MobileNetV2": mobilenet_v2,
-    "MobileNetV3": mobilenet_v3,
-    "NASNet": nasnet,
-    "ResNet": resnet,
-    "ResNetV2": resnet_v2,
-    "VGG16": vgg16,
-    "VGG19": vgg19,
-    "Xception": xception,
+ALLOWED_MODELS = {
+    "DenseNet121": {"family": densenet, "label": "DenseNet121"},
+    "DenseNet169": {"family": densenet, "label": "DenseNet169"},
+    "DenseNet201": {"family": densenet, "label": "DenseNet201"},
+    "EfficientNetB0": {"family": efficientnet, "label": "EfficientNetB0"},
+    "EfficientNetB1": {"family": efficientnet, "label": "EfficientNetB1"},
+    "EfficientNetB2": {"family": efficientnet, "label": "EfficientNetB2"},
+    "EfficientNetB3": {"family": efficientnet, "label": "EfficientNetB3"},
+    "EfficientNetB4": {"family": efficientnet, "label": "EfficientNetB4"},
+    "EfficientNetB5": {"family": efficientnet, "label": "EfficientNetB5"},
+    "EfficientNetB6": {"family": efficientnet, "label": "EfficientNetB6"},
+    "EfficientNetV2B0": {"family": efficientnet_v2, "label": "EfficientNetV2B0"},
+    "EfficientNetV2B1": {"family": efficientnet_v2, "label": "EfficientNetV2B1"},
+    "EfficientNetV2B2": {"family": efficientnet_v2, "label": "EfficientNetV2B2"},
+    "EfficientNetV2B3": {"family": efficientnet_v2, "label": "EfficientNetV2B3"},
+    "EfficientNetV2S": {"family": efficientnet_v2, "label": "EfficientNetV2S"},
+    "EfficientNetV2M": {"family": efficientnet_v2, "label": "EfficientNetV2M"},
+    "InceptionResNetV2": {"family": inception_resnet_v2, "label": "InceptionResNetV2"},
+    "InceptionV3": {"family": inception_v3, "label": "InceptionV3"},
+    "MobileNet": {"family": mobilenet},
+    "MobileNetV2": {"family": mobilenet_v2, "label": "MobileNetV2"},
+    "MobileNetV3Small": {"family": mobilenet_v3, "label": "MobileNetV3Small"},
+    "MobileNetV3Large": {"family": mobilenet_v3, "label": "MobileNetV3Large"},
+    "NASNetMobile": {"family": nasnet, "label": "NASNetMobile"},
+    "ResNet50": {"family": resnet, "label": "ResNet50"},
+    "ResNet101": {"family": resnet, "label": "ResNet101"},
+    "ResNet152": {"family": resnet, "label": "ResNet152"},
+    "ResNet50V2": {"family": resnet_v2, "label": "ResNet50V2"},
+    "ResNet101V2": {"family": resnet_v2, "label": "ResNet101V2"},
+    "ResNet152V2": {"family": resnet_v2, "label": "ResNet152V2"},
+    "VGG16": {"family": vgg16, "label": "VGG16"},
+    "VGG19": {"family": vgg19, "label": "VGG19"},
+    "Xception": {"family": xception, "label": "Xception"},
+    "Custom": {"family": "custom", "label": "Custom"},
 }
 
 # ==== CONFIGURATION & CONSTANTS ====
@@ -89,7 +110,9 @@ def get_global_store() -> dict:
         "batches": None,
         "batches_last_updated": None,
         "gsheet_conn": None,
-        "configured_batches": set(),  # Track which batches have been verified/created
+        "configured_batches": set(),
+        "is_evaluating": False,
+        "eval_start_time": None,
     }
 
 
@@ -355,7 +378,7 @@ def evaluate_model_streaming(
                 if model_type == "Custom":
                     arr /= 255.0
                 else:
-                    arr = model_map[model_type].preprocess_input(arr)
+                    arr = ALLOWED_MODELS[model_type]["family"].preprocess_input(arr)
 
             batch.append(arr)
 
@@ -450,7 +473,7 @@ def get_participant_info() -> None:
                 st.session_state.batch = row["Batch"]
                 st.session_state.alltime = row["Show All-time?"]
                 st.rerun()
-            elif st.button("Log In"):
+            else:
                 st.error("Invalid Code.")
 
 
@@ -560,6 +583,50 @@ def show_leaderboard() -> None:
         st.dataframe(at_view, width="stretch")
 
 
+
+
+
+def verify_architecture(model, selected_model_name: str) -> bool:
+    """
+    Robust verification that the expected backbone exists
+    inside the constructed model.
+    """
+
+    def normalize_name(name: str) -> str:
+        return re.sub(r'[^a-z0-9]', '', name.lower())
+
+    if selected_model_name == "Custom":
+        return True
+
+    target = normalize_name(selected_model_name)
+
+    if target in normalize_name(model.name):
+        return True
+
+    for layer in model.layers:
+
+        if target in normalize_name(layer.name):
+            return True
+
+        if target in normalize_name(layer.__class__.__name__):
+            return True
+
+        if isinstance(layer, tf.keras.Model):
+
+            if target in normalize_name(layer.name):
+                return True
+
+            if target in normalize_name(layer.__class__.__name__):
+                return True
+
+            for sub_layer in layer.layers:
+                if target in normalize_name(sub_layer.name):
+                    return True
+                if target in normalize_name(sub_layer.__class__.__name__):
+                    return True
+
+    return False
+
 # ==== MAIN ====
 
 
@@ -582,10 +649,10 @@ def main() -> None:
             )
             with cols[0]:
                 model_type = st.selectbox(
-                    "Select model type:",
-                    model_map.keys(),
+                    "Select the exact model used:",
+                    options=list(ALLOWED_MODELS.keys()), # Now shows specific models
                     index=None,
-                    help=help_model_selection,
+                    help="Note: Large models (ConvNeXt, EfficientNetL, etc.) are disabled for stability."
                 )
             with cols[1]:
                 apply_preprocess = st.radio(
@@ -596,25 +663,51 @@ def main() -> None:
                 ) == "No"
             if model_type:  # noqa: SIM102
                 if st.button("Evaluate Model", type="primary"):
-                    with st.spinner("Analyzing model performance..."):  # noqa: SIM117
-                        with tempfile.NamedTemporaryFile(
-                            suffix=".keras",
-                            delete=True,
-                        ) as tmpf:
-                            tmpf.write(uploaded_file.getbuffer())
-                            tmpf.flush()
+                    store = get_global_store()
+                    now = time.time()
+                    TIMEOUT_SECONDS = 300
+                    waiting_placeholder = st.empty()
+                    while store["is_evaluating"]:
+                        start_time = store.get("eval_start_time")
+                        if start_time and (now - start_time) > TIMEOUT_SECONDS:
+                            waiting_placeholder.info("⚠️ Previous evaluation timed out or crashed. Recovering...")
+                            break
+                        waiting_placeholder.warning(
+                            "⏳ Another user is currently evaluating a model. "
+                            "Please wait, your evaluation will start automatically when the server is free..."
+                        )
+                        time.sleep(5)
+                        now = time.time()
+                    store["is_evaluating"] = True
+                    store["eval_start_time"] = time.time()
+                    waiting_placeholder.empty()
+                    try:
+                        with st.spinner("Analyzing model performance..."):  # noqa: SIM117
+                            with tempfile.NamedTemporaryFile(suffix=".keras", delete=False) as tmpf:
+                                tmpf.write(uploaded_file.getbuffer())
+                                model_path = tmpf.name
+
+                            uploaded_file = None
+                            gc.collect()
+
                             try:
                                 if model_type == "Custom":
-                                    model = tf.keras.models.load_model(tmpf.name)
+                                    model = tf.keras.models.load_model(model_path)
                                 else:
                                     model = tf.keras.models.load_model(
-                                        tmpf.name,
+                                        model_path,
                                         custom_objects={
-                                            "preprocess_input": model_map[
-                                                model_type
-                                            ].preprocess_input,
+                                            "preprocess_input": ALLOWED_MODELS[model_type]["family"].preprocess_input,
                                         },
                                     )
+
+                                if not verify_architecture(model, model_type):
+                                    st.error(f"Architecture Mismatch! Your model does not appear to be built on {model_type}. "
+                                            "Please ensure you are selecting the correct backbone.")
+                                    del model
+                                    Path(model_path).unlink(missing_ok=True)
+                                    st.stop()
+
                                 input_shape = model.input_shape
                                 if len(input_shape) == 4 and input_shape[-1] == 3:
                                     input_size = (input_shape[1], input_shape[2])
@@ -669,8 +762,16 @@ def main() -> None:
 
                                 del model
                                 tf.keras.backend.clear_session()
+                                Path(model_path).unlink(missing_ok=True)
                             except Exception as e:
                                 st.error(f"Error evaluating model: {e}")
+                    except:
+                        pass
+                    finally:
+                        store["is_evaluating"] = False
+                        store["eval_start_time"] = None
+                        if 'model_path' in locals():
+                            Path(model_path).unlink(missing_ok=True)
 
         plot_submissions(st.session_state.user_name)
         show_leaderboard()
