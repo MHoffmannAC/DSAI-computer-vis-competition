@@ -640,138 +640,137 @@ def main() -> None:
 
     if st.session_state.user_name and st.session_state.batch:
         st.subheader("📤 Submit Your Model", anchor=False)
-        uploaded_file = st.file_uploader("Select a Keras model file", type=["keras"])
-
-        if uploaded_file:
-            cols = st.columns(
+        cols = st.columns(
                 2,
                 gap="large",
             )
-            with cols[0]:
-                model_type = st.selectbox(
-                    "Select the exact model used:",
-                    options=list(ALLOWED_MODELS.keys()), # Now shows specific models
-                    index=None,
-                    help="Note: Large models (ConvNeXt, EfficientNetL, etc.) are disabled for stability."
-                )
-            with cols[1]:
-                apply_preprocess = st.radio(
-                    "Does your model handle preprocessing?",
-                    options=["Yes", "No"],
-                    index=0,
-                    help=help_preprocessing,
-                ) == "No"
-            if model_type:  # noqa: SIM102
-                if st.button("Evaluate Model", type="primary"):
-                    store = get_global_store()
+        with cols[0]:
+            model_type = st.selectbox(
+                "Select the exact model used:",
+                options=list(ALLOWED_MODELS.keys()), # Now shows specific models
+                index=None,
+                help="Note: Large models (ConvNeXt, EfficientNetL, etc.) are disabled for stability."
+            )
+        with cols[1]:
+            apply_preprocess = st.radio(
+                "Does your model handle preprocessing?",
+                options=["Yes", "No"],
+                index=0,
+                help=help_preprocessing,
+            ) == "No"
+        if model_type:
+            uploaded_file = st.file_uploader("Select a Keras model file", type=["keras"])
+
+            if uploaded_file:
+                store = get_global_store()
+                now = time.time()
+                TIMEOUT_SECONDS = 300
+                waiting_placeholder = st.empty()
+                while store["is_evaluating"]:
+                    start_time = store.get("eval_start_time")
+                    if start_time and (now - start_time) > TIMEOUT_SECONDS:
+                        waiting_placeholder.info("⚠️ Previous evaluation timed out or crashed. Recovering...")
+                        break
+                    waiting_placeholder.warning(
+                        "⏳ Another user is currently evaluating a model. "
+                        "Please wait, your evaluation will start automatically when the server is free..."
+                    )
+                    time.sleep(5)
                     now = time.time()
-                    TIMEOUT_SECONDS = 300
-                    waiting_placeholder = st.empty()
-                    while store["is_evaluating"]:
-                        start_time = store.get("eval_start_time")
-                        if start_time and (now - start_time) > TIMEOUT_SECONDS:
-                            waiting_placeholder.info("⚠️ Previous evaluation timed out or crashed. Recovering...")
-                            break
-                        waiting_placeholder.warning(
-                            "⏳ Another user is currently evaluating a model. "
-                            "Please wait, your evaluation will start automatically when the server is free..."
-                        )
-                        time.sleep(5)
-                        now = time.time()
-                    store["is_evaluating"] = True
-                    store["eval_start_time"] = time.time()
-                    waiting_placeholder.empty()
-                    try:
-                        with st.spinner("Analyzing model performance..."):  # noqa: SIM117
-                            with tempfile.NamedTemporaryFile(suffix=".keras", delete=False) as tmpf:
-                                tmpf.write(uploaded_file.getbuffer())
-                                model_path = tmpf.name
+                store["is_evaluating"] = True
+                store["eval_start_time"] = time.time()
+                waiting_placeholder.empty()
+                try:
+                    with st.spinner("Analyzing model performance..."):  # noqa: SIM117
+                        with tempfile.NamedTemporaryFile(suffix=".keras", delete=False) as tmpf:
+                            tmpf.write(uploaded_file.getbuffer())
+                            model_path = tmpf.name
 
-                            uploaded_file = None
-                            gc.collect()
+                        uploaded_file = None
+                        gc.collect()
 
-                            try:
-                                if model_type == "Custom":
-                                    model = tf.keras.models.load_model(model_path)
-                                else:
-                                    model = tf.keras.models.load_model(
-                                        model_path,
-                                        custom_objects={
-                                            "preprocess_input": ALLOWED_MODELS[model_type]["family"].preprocess_input,
-                                        },
-                                    )
+                        try:
+                            if model_type == "Custom":
+                                model = tf.keras.models.load_model(model_path)
+                            else:
+                                model = tf.keras.models.load_model(
+                                    model_path,
+                                    custom_objects={
+                                        "preprocess_input": ALLOWED_MODELS[model_type]["family"].preprocess_input,
+                                    },
+                                )
 
-                                if not verify_architecture(model, model_type):
-                                    st.error(f"Architecture Mismatch! Your model does not appear to be built on {model_type}. "
-                                            "Please ensure you are selecting the correct backbone.")
-                                    del model
-                                    Path(model_path).unlink(missing_ok=True)
-                                    st.stop()
-
-                                input_shape = model.input_shape
-                                if len(input_shape) == 4 and input_shape[-1] == 3:
-                                    input_size = (input_shape[1], input_shape[2])
-
-                                    acc, y_pred, y_test = evaluate_model_streaming(
-                                        model,
-                                        input_size,
-                                        model_type,
-                                        apply_preprocess,
-                                    )
-
-                                    result = pd.DataFrame(
-                                        [
-                                            {
-                                                "accuracy": round(acc, 4),
-                                                "participant": st.session_state.user_name,
-                                                "batch": st.session_state.batch,
-                                                "submission_time": pd.Timestamp.now().isoformat(),
-                                                "model_type": model_type,
-                                            },
-                                        ],
-                                    )
-
-                                    update_submissions(result)
-                                    st.success(f"Success! Model Accuracy: {acc:.2%}")
-                                    st.subheader("🧮 Confusion Matrix")
-                                    fig, ax = plt.subplots(
-                                        figsize=(2, 2), facecolor="black",
-                                    )
-                                    cm = confusion_matrix(y_test, y_pred)
-                                    sns.heatmap(
-                                        cm,
-                                        annot=True,
-                                        fmt="d",
-                                        cmap="copper",
-                                        xticklabels=CLASS_NAMES,
-                                        yticklabels=CLASS_NAMES,
-                                        ax=ax,
-                                        cbar=False,
-                                        annot_kws={"color": "white", "fontsize": 8},
-                                    )
-                                    ax.set_xlabel("Predicted", color="white")
-                                    ax.set_ylabel("True Label", color="white")
-                                    ax.tick_params(colors="white", labelsize=8)
-                                    ax.tick_params(
-                                        which="both",
-                                        length=0,
-                                    )
-                                    st.pyplot(fig, width="content")
-                                else:
-                                    st.error("Incompatible model shape.")
-
+                            if not verify_architecture(model, model_type):
+                                st.error(f"Architecture Mismatch! Your model does not appear to be built on {model_type}. "
+                                        "Please ensure you are selecting the correct backbone.")
                                 del model
-                                tf.keras.backend.clear_session()
                                 Path(model_path).unlink(missing_ok=True)
-                            except Exception as e:
-                                st.error(f"Error evaluating model: {e}")
-                    except:
-                        pass
-                    finally:
-                        store["is_evaluating"] = False
-                        store["eval_start_time"] = None
-                        if 'model_path' in locals():
+                                st.stop()
+
+                            input_shape = model.input_shape
+                            if len(input_shape) == 4 and input_shape[-1] == 3:
+                                input_size = (input_shape[1], input_shape[2])
+
+                                acc, y_pred, y_test = evaluate_model_streaming(
+                                    model,
+                                    input_size,
+                                    model_type,
+                                    apply_preprocess,
+                                )
+
+                                result = pd.DataFrame(
+                                    [
+                                        {
+                                            "accuracy": round(acc, 4),
+                                            "participant": st.session_state.user_name,
+                                            "batch": st.session_state.batch,
+                                            "submission_time": pd.Timestamp.now().isoformat(),
+                                            "model_type": model_type,
+                                        },
+                                    ],
+                                )
+
+                                update_submissions(result)
+                                st.success(f"Success! Model Accuracy: {acc:.2%}")
+                                st.subheader("🧮 Confusion Matrix")
+                                fig, ax = plt.subplots(
+                                    figsize=(2, 2), facecolor="black",
+                                )
+                                cm = confusion_matrix(y_test, y_pred)
+                                sns.heatmap(
+                                    cm,
+                                    annot=True,
+                                    fmt="d",
+                                    cmap="copper",
+                                    xticklabels=CLASS_NAMES,
+                                    yticklabels=CLASS_NAMES,
+                                    ax=ax,
+                                    cbar=False,
+                                    annot_kws={"color": "white", "fontsize": 8},
+                                )
+                                ax.set_xlabel("Predicted", color="white")
+                                ax.set_ylabel("True Label", color="white")
+                                ax.tick_params(colors="white", labelsize=8)
+                                ax.tick_params(
+                                    which="both",
+                                    length=0,
+                                )
+                                st.pyplot(fig, width="content")
+                            else:
+                                st.error("Incompatible model shape.")
+
+                            del model
+                            tf.keras.backend.clear_session()
                             Path(model_path).unlink(missing_ok=True)
+                        except Exception as e:
+                            st.error(f"Error evaluating model: {e}")
+                except:
+                    pass
+                finally:
+                    store["is_evaluating"] = False
+                    store["eval_start_time"] = None
+                    if 'model_path' in locals():
+                        Path(model_path).unlink(missing_ok=True)
 
         plot_submissions(st.session_state.user_name)
         show_leaderboard()
