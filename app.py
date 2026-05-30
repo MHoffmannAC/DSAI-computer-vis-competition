@@ -35,6 +35,7 @@ from tensorflow.keras.applications import (
 )
 
 ALLOWED_MODELS = {
+    "Custom": {"family": "custom", "label": "Custom"},
     "DenseNet121": {"family": densenet, "label": "DenseNet121"},
     "DenseNet169": {"family": densenet, "label": "DenseNet169"},
     "DenseNet201": {"family": densenet, "label": "DenseNet201"},
@@ -43,15 +44,15 @@ ALLOWED_MODELS = {
     "EfficientNetB2": {"family": efficientnet, "label": "EfficientNetB2"},
     "EfficientNetB3": {"family": efficientnet, "label": "EfficientNetB3"},
     "EfficientNetB4": {"family": efficientnet, "label": "EfficientNetB4"},
-    "EfficientNetB5": {"family": efficientnet, "label": "EfficientNetB5"},
-    "EfficientNetB6": {"family": efficientnet, "label": "EfficientNetB6"},
+#    "EfficientNetB5": {"family": efficientnet, "label": "EfficientNetB5"},
+#    "EfficientNetB6": {"family": efficientnet, "label": "EfficientNetB6"},
     "EfficientNetV2B0": {"family": efficientnet_v2, "label": "EfficientNetV2B0"},
     "EfficientNetV2B1": {"family": efficientnet_v2, "label": "EfficientNetV2B1"},
     "EfficientNetV2B2": {"family": efficientnet_v2, "label": "EfficientNetV2B2"},
     "EfficientNetV2B3": {"family": efficientnet_v2, "label": "EfficientNetV2B3"},
     "EfficientNetV2S": {"family": efficientnet_v2, "label": "EfficientNetV2S"},
-    "EfficientNetV2M": {"family": efficientnet_v2, "label": "EfficientNetV2M"},
-    "InceptionResNetV2": {"family": inception_resnet_v2, "label": "InceptionResNetV2"},
+#    "EfficientNetV2M": {"family": efficientnet_v2, "label": "EfficientNetV2M"},
+#    "InceptionResNetV2": {"family": inception_resnet_v2, "label": "InceptionResNetV2"},
     "InceptionV3": {"family": inception_v3, "label": "InceptionV3"},
     "MobileNet": {"family": mobilenet},
     "MobileNetV2": {"family": mobilenet_v2, "label": "MobileNetV2"},
@@ -59,15 +60,14 @@ ALLOWED_MODELS = {
     "MobileNetV3Large": {"family": mobilenet_v3, "label": "MobileNetV3Large"},
     "NASNetMobile": {"family": nasnet, "label": "NASNetMobile"},
     "ResNet50": {"family": resnet, "label": "ResNet50"},
-    "ResNet101": {"family": resnet, "label": "ResNet101"},
-    "ResNet152": {"family": resnet, "label": "ResNet152"},
+#    "ResNet101": {"family": resnet, "label": "ResNet101"},
+#    "ResNet152": {"family": resnet, "label": "ResNet152"},
     "ResNet50V2": {"family": resnet_v2, "label": "ResNet50V2"},
-    "ResNet101V2": {"family": resnet_v2, "label": "ResNet101V2"},
-    "ResNet152V2": {"family": resnet_v2, "label": "ResNet152V2"},
+#    "ResNet101V2": {"family": resnet_v2, "label": "ResNet101V2"},
+#    "ResNet152V2": {"family": resnet_v2, "label": "ResNet152V2"},
     "VGG16": {"family": vgg16, "label": "VGG16"},
     "VGG19": {"family": vgg19, "label": "VGG19"},
     "Xception": {"family": xception, "label": "Xception"},
-    "Custom": {"family": "custom", "label": "Custom"},
 }
 
 # ==== CONFIGURATION & CONSTANTS ====
