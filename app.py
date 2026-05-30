@@ -1,7 +1,7 @@
+import gc
+import re
 import tempfile
 import time
-import re
-import gc
 from pathlib import Path
 
 import altair as alt
@@ -21,7 +21,7 @@ from tensorflow.keras.applications import (
     densenet,
     efficientnet,
     efficientnet_v2,
-    inception_resnet_v2,
+#    inception_resnet_v2,
     inception_v3,
     mobilenet,
     mobilenet_v2,
@@ -765,14 +765,19 @@ def main() -> None:
 
                             del model
                             tf.keras.backend.clear_session()
+                            gc.collect()
                             Path(model_path).unlink(missing_ok=True)
                         except Exception as e:
                             st.error(f"Error evaluating model: {e}")
+                            tf.keras.backend.clear_session()
+                            gc.collect()
                 except:
                     pass
                 finally:
                     store["is_evaluating"] = False
                     store["eval_start_time"] = None
+                    tf.keras.backend.clear_session()
+                    gc.collect()
                     if 'model_path' in locals():
                         Path(model_path).unlink(missing_ok=True)
 
