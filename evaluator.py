@@ -221,8 +221,8 @@ def evaluate_model_streaming(
 
             write_progress(
                 progress_file,
-                i + 1,
-                total,
+                (i + 1) * 12,
+                total * 12,
                 current_acc,
             )
 
