@@ -45,7 +45,7 @@ ALLOWED_MODELS = {
 #    "EfficientNetV2M": {"family": efficientnet_v2, "label": "EfficientNetV2M"},
 #    "InceptionResNetV2": {"family": inception_resnet_v2, "label": "InceptionResNetV2"},
     "InceptionV3": {"family": inception_v3, "label": "InceptionV3"},
-    "MobileNet": {"family": mobilenet},
+    "MobileNet": {"family": mobilenet, "label": "MobileNet"},
     "MobileNetV2": {"family": mobilenet_v2, "label": "MobileNetV2"},
     "MobileNetV3Small": {"family": mobilenet_v3, "label": "MobileNetV3Small"},
     "MobileNetV3Large": {"family": mobilenet_v3, "label": "MobileNetV3Large"},
@@ -151,12 +151,24 @@ def verify_architecture(model, selected_model_name: str) -> bool:
 
     return False
 
+def write_progress(progress_file, done, total, accuracy):
+    with open(progress_file, "w") as f:
+        json.dump(
+            {
+                "done": done,
+                "total": total,
+                "progress": done / total,
+                "accuracy": accuracy,
+            },
+            f,
+        )
 
 def evaluate_model_streaming(
     model: tf.keras.Model,
     input_size: tuple[int, int],
     model_type: str,
     apply_preprocess: bool,
+    progress_file,
 ):
     paths = list(iter_test_image_paths())
     total = len(paths)
@@ -207,6 +219,13 @@ def evaluate_model_streaming(
 
             current_acc = correct / total_preds
 
+            write_progress(
+                progress_file,
+                i + 1,
+                total,
+                current_acc,
+            )
+
     finally:
         gc.collect()
 
@@ -215,31 +234,30 @@ def evaluate_model_streaming(
 
 def main():
 
+    model = None
     model_path = sys.argv[1]
     model_type = sys.argv[2]
     apply_preprocess = sys.argv[3] == "True"
     output_json = sys.argv[4]
+    progress_json = sys.argv[5]
 
-    if model_type == "Custom":
-        model = tf.keras.models.load_model(model_path)
-    else:
-        model = tf.keras.models.load_model(
-            model_path,
-            custom_objects={
-                "preprocess_input": ALLOWED_MODELS[model_type]["family"].preprocess_input,
-            },
-        )
-
-    if not verify_architecture(model, model_type):
-        del model
-        tf.keras.backend.clear_session()
-        gc.collect()
-        raise RuntimeError(
-            f"Architecture mismatch: expected {model_type}"
-        )
-
-    input_shape = model.input_shape
     try:
+        if model_type == "Custom":
+            model = tf.keras.models.load_model(model_path)
+        else:
+            model = tf.keras.models.load_model(
+                model_path,
+                custom_objects={
+                    "preprocess_input": ALLOWED_MODELS[model_type]["family"].preprocess_input,
+                },
+            )
+
+        if not verify_architecture(model, model_type):
+            raise RuntimeError(
+                f"Architecture mismatch: expected {model_type}"
+            )
+
+        input_shape = model.input_shape
         input_size = (input_shape[1], input_shape[2])
 
         acc, y_pred, y_true = evaluate_model_streaming(
@@ -247,6 +265,7 @@ def main():
             input_size,
             model_type,
             apply_preprocess,
+            progress_json,
         )
 
         result = {
@@ -258,12 +277,9 @@ def main():
         with open(output_json, "w") as f:
             json.dump(result, f)
 
-        del model
-        tf.keras.backend.clear_session()
-        gc.collect()
-
     finally:
-        del model
+        if model is not None:
+            model = None
         tf.keras.backend.clear_session()
         gc.collect()
 

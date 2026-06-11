@@ -518,7 +518,9 @@ def main() -> None:
                                 delete=False,
                             ).name
 
-                            subprocess.run(
+                            progress_path = results_path.replace(".json", "_progress.json")
+
+                            process = subprocess.Popen(
                                 [
                                     sys.executable,
                                     "evaluator.py",
@@ -526,10 +528,47 @@ def main() -> None:
                                     model_type,
                                     str(apply_preprocess),
                                     results_path,
+                                    progress_path,
                                 ],
-                                check=True,
-                                timeout=300,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                text=True,
                             )
+
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+
+                            status_text.info("Loading model...")
+
+                            while process.poll() is None:
+
+                                if Path(progress_path).exists():
+                                    try:
+                                        try:
+                                            with open(progress_path, "r") as f:
+                                                progress = json.load(f)
+                                        except (json.JSONDecodeError, FileNotFoundError):
+                                            continue
+
+                                        progress_bar.progress(progress["progress"])
+
+                                        status_text.write(
+                                            f"Image {progress['done']}/{progress['total']} "
+                                            f"| Current accuracy: {progress['accuracy']:.2%}"
+                                        )
+
+                                    except Exception:
+                                        pass
+
+                                time.sleep(0.5)
+
+                            stdout, stderr = process.communicate()
+                            progress_bar.progress(1.0)
+                            status_text.success("Evaluation complete!")
+
+                            if process.returncode != 0:
+                                st.code(stderr)
+                                raise RuntimeError("Evaluation failed")
 
                             with open(results_path) as f:
                                 results = json.load(f)
@@ -595,6 +634,8 @@ def main() -> None:
                         Path(model_path).unlink(missing_ok=True)
                     if 'results_path' in locals():
                         Path(results_path).unlink(missing_ok=True)
+                    if 'progress_path' in locals():
+                        Path(progress_path).unlink(missing_ok=True)
 
         plot_submissions(st.session_state.user_name)
         show_leaderboard()
