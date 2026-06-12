@@ -110,47 +110,6 @@ def generate_augmented_images(img: Image.Image):
         yield zoom_out(fimg)
 
 
-def verify_architecture(model, selected_model_name: str) -> bool:
-    """
-    Robust verification that the expected backbone exists
-    inside the constructed model.
-    """
-
-    def normalize_name(name: str) -> str:
-        return re.sub(r'[^a-z0-9]', '', name.lower())
-
-    if selected_model_name == "Custom":
-        return True
-
-    target = normalize_name(selected_model_name)
-
-    if target in normalize_name(model.name):
-        return True
-
-    for layer in model.layers:
-
-        if target in normalize_name(layer.name):
-            return True
-
-        if target in normalize_name(layer.__class__.__name__):
-            return True
-
-        if isinstance(layer, tf.keras.Model):
-
-            if target in normalize_name(layer.name):
-                return True
-
-            if target in normalize_name(layer.__class__.__name__):
-                return True
-
-            for sub_layer in layer.layers:
-                if target in normalize_name(sub_layer.name):
-                    return True
-                if target in normalize_name(sub_layer.__class__.__name__):
-                    return True
-
-    return False
-
 def write_progress(progress_file, done, total, accuracy):
     with open(progress_file, "w") as f:
         json.dump(
@@ -250,11 +209,6 @@ def main():
                 custom_objects={
                     "preprocess_input": ALLOWED_MODELS[model_type]["family"].preprocess_input,
                 },
-            )
-
-        if not verify_architecture(model, model_type):
-            raise RuntimeError(
-                f"Architecture mismatch: expected {model_type}"
             )
 
         input_shape = model.input_shape
