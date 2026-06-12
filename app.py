@@ -321,7 +321,7 @@ def get_participant_info() -> None:
                 st.error("Database connection failed.")
                 st.stop()
 
-        user_name = st.text_input("Username (Real Name or Alias):")
+        user_name = st.text_input("Username (Real Name or Alias):") + "_augtest"
         code_input = st.text_input("Secret Batch Code:", type="password")
 
         if user_name and code_input:
