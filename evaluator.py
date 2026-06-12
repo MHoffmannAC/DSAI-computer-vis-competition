@@ -81,11 +81,11 @@ def iter_test_image_paths():
 def generate_augmented_images(img: Image.Image):
     flip_variants = [
         img,
-        img.transpose(Image.Transpose.FLIP_LEFT_RIGHT),
-        img.transpose(Image.Transpose.FLIP_TOP_BOTTOM),
-        img.transpose(Image.Transpose.FLIP_LEFT_RIGHT).transpose(
-            Image.Transpose.FLIP_TOP_BOTTOM
-        ),
+        #img.transpose(Image.Transpose.FLIP_LEFT_RIGHT),
+        #img.transpose(Image.Transpose.FLIP_TOP_BOTTOM),
+        #img.transpose(Image.Transpose.FLIP_LEFT_RIGHT).transpose(
+        #    Image.Transpose.FLIP_TOP_BOTTOM
+        #),
     ]
 
     def zoom_in(im, factor=1.1):
@@ -106,8 +106,8 @@ def generate_augmented_images(img: Image.Image):
 
     for fimg in flip_variants:
         yield fimg
-        yield zoom_in(fimg)
-        yield zoom_out(fimg)
+        #yield zoom_in(fimg)
+        #yield zoom_out(fimg)
 
 
 def write_progress(progress_file, done, total, accuracy):
