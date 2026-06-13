@@ -1,4 +1,5 @@
 import gc
+import hashlib
 import re
 import tempfile
 import time
@@ -484,158 +485,162 @@ def main() -> None:
             uploaded_file = st.file_uploader("Select a Keras model file", type=["keras"])
 
             if uploaded_file:
-                store = get_global_store()
-                now = time.time()
-                TIMEOUT_SECONDS = 300
-                waiting_placeholder = st.empty()
-                while store["is_evaluating"]:
-                    start_time = store.get("eval_start_time")
-                    if start_time and (now - start_time) > TIMEOUT_SECONDS:
-                        waiting_placeholder.info("⚠️ Previous evaluation timed out or crashed. Recovering...")
-                        break
-                    waiting_placeholder.warning(
-                        "⏳ Another user is currently evaluating a model. "
-                        "Please wait, your evaluation will start automatically when the server is free..."
-                    )
-                    time.sleep(5)
+                file_hash = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
+                if st.session_state.get("last_processed_hash") != file_hash:
+                    st.session_state.last_processed_hash = file_hash
+
+                    store = get_global_store()
                     now = time.time()
-                store["is_evaluating"] = True
-                store["eval_start_time"] = time.time()
-                waiting_placeholder.empty()
-                try:
-                    with st.spinner("Analyzing model performance..."):  # noqa: SIM117
-                        with tempfile.NamedTemporaryFile(suffix=".keras", delete=False) as tmpf:
-                            tmpf.write(uploaded_file.getbuffer())
-                            model_path = tmpf.name
+                    TIMEOUT_SECONDS = 300
+                    waiting_placeholder = st.empty()
+                    while store["is_evaluating"]:
+                        start_time = store.get("eval_start_time")
+                        if start_time and (now - start_time) > TIMEOUT_SECONDS:
+                            waiting_placeholder.info("⚠️ Previous evaluation timed out or crashed. Recovering...")
+                            break
+                        waiting_placeholder.warning(
+                            "⏳ Another user is currently evaluating a model. "
+                            "Please wait, your evaluation will start automatically when the server is free..."
+                        )
+                        time.sleep(5)
+                        now = time.time()
+                    store["is_evaluating"] = True
+                    store["eval_start_time"] = time.time()
+                    waiting_placeholder.empty()
+                    try:
+                        with st.spinner("Analyzing model performance..."):  # noqa: SIM117
+                            with tempfile.NamedTemporaryFile(suffix=".keras", delete=False) as tmpf:
+                                tmpf.write(uploaded_file.getbuffer())
+                                model_path = tmpf.name
 
-                        uploaded_file = None
-                        gc.collect()
+                            uploaded_file = None
+                            gc.collect()
 
-                        try:
+                            try:
 
-                            results_path = tempfile.NamedTemporaryFile(
-                                suffix=".json",
-                                delete=False,
-                            ).name
+                                results_path = tempfile.NamedTemporaryFile(
+                                    suffix=".json",
+                                    delete=False,
+                                ).name
 
-                            progress_path = results_path.replace(".json", "_progress.json")
+                                progress_path = results_path.replace(".json", "_progress.json")
 
-                            process = subprocess.Popen(
-                                [
-                                    sys.executable,
-                                    "evaluator.py",
-                                    model_path,
-                                    model_type,
-                                    str(apply_preprocess),
-                                    results_path,
-                                    progress_path,
-                                ],
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE,
-                                text=True,
-                            )
+                                process = subprocess.Popen(
+                                    [
+                                        sys.executable,
+                                        "evaluator.py",
+                                        model_path,
+                                        model_type,
+                                        str(apply_preprocess),
+                                        results_path,
+                                        progress_path,
+                                    ],
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
+                                    text=True,
+                                )
 
-                            progress_bar = st.progress(0)
-                            status_text = st.empty()
+                                progress_bar = st.progress(0)
+                                status_text = st.empty()
 
-                            status_text.info("Loading model...")
+                                status_text.info("Loading model...")
 
-                            while process.poll() is None:
+                                while process.poll() is None:
 
-                                if Path(progress_path).exists():
-                                    try:
+                                    if Path(progress_path).exists():
                                         try:
-                                            with open(progress_path, "r") as f:
-                                                progress = json.load(f)
-                                        except (json.JSONDecodeError, FileNotFoundError):
-                                            continue
+                                            try:
+                                                with open(progress_path, "r") as f:
+                                                    progress = json.load(f)
+                                            except (json.JSONDecodeError, FileNotFoundError):
+                                                continue
 
-                                        progress_bar.progress(progress["progress"])
+                                            progress_bar.progress(progress["progress"])
 
-                                        status_text.write(
-                                            f"Image {progress['done']}/{progress['total']} "
-                                            f"| Current accuracy: {progress['accuracy']:.2%}"
-                                        )
+                                            status_text.write(
+                                                f"Image {progress['done']}/{progress['total']} "
+                                                f"| Current accuracy: {progress['accuracy']:.2%}"
+                                            )
 
-                                    except Exception:
-                                        pass
+                                        except Exception:
+                                            pass
 
-                                time.sleep(0.5)
+                                    time.sleep(0.5)
 
-                            stdout, stderr = process.communicate()
-                            progress_bar.progress(1.0)
-                            status_text.success("Evaluation complete!")
+                                stdout, stderr = process.communicate()
+                                progress_bar.progress(1.0)
+                                status_text.success("Evaluation complete!")
 
-                            if process.returncode != 0:
-                                st.code(stderr)
-                                raise RuntimeError("Evaluation failed")
+                                if process.returncode != 0:
+                                    st.code(stderr)
+                                    raise RuntimeError("Evaluation failed")
 
-                            with open(results_path) as f:
-                                results = json.load(f)
+                                with open(results_path) as f:
+                                    results = json.load(f)
 
-                            acc = results["accuracy"]
+                                acc = results["accuracy"]
 
-                            y_pred = np.array(results["y_pred"])
-                            y_test = np.array(results["y_true"])
+                                y_pred = np.array(results["y_pred"])
+                                y_test = np.array(results["y_true"])
 
-                            result = pd.DataFrame(
-                                [
-                                    {
-                                        "accuracy": round(acc, 4),
-                                        "participant": st.session_state.user_name,
-                                        "batch": st.session_state.batch,
-                                        "submission_time": pd.Timestamp.now().isoformat(),
-                                        "model_type": model_type,
-                                    },
-                                ],
-                            )
+                                result = pd.DataFrame(
+                                    [
+                                        {
+                                            "accuracy": round(acc, 4),
+                                            "participant": st.session_state.user_name,
+                                            "batch": st.session_state.batch,
+                                            "submission_time": pd.Timestamp.now().isoformat(),
+                                            "model_type": model_type,
+                                        },
+                                    ],
+                                )
 
-                            update_submissions(result)
-                            st.success(f"Success! Model Accuracy: {acc:.2%}")
-                            st.subheader("🧮 Confusion Matrix")
-                            fig, ax = plt.subplots(
-                                figsize=(2, 2), facecolor="black",
-                            )
-                            cm = confusion_matrix(y_test, y_pred)
-                            sns.heatmap(
-                                cm,
-                                annot=True,
-                                fmt="d",
-                                cmap="copper",
-                                xticklabels=CLASS_NAMES,
-                                yticklabels=CLASS_NAMES,
-                                ax=ax,
-                                cbar=False,
-                                annot_kws={"color": "white", "fontsize": 8},
-                            )
-                            ax.set_xlabel("Predicted", color="white")
-                            ax.set_ylabel("True Label", color="white")
-                            ax.tick_params(colors="white", labelsize=8)
-                            ax.tick_params(
-                                which="both",
-                                length=0,
-                            )
-                            st.pyplot(fig, width="content")
-                            plt.close(fig)
+                                update_submissions(result)
+                                st.success(f"Success! Model Accuracy: {acc:.2%}")
+                                st.subheader("🧮 Confusion Matrix")
+                                fig, ax = plt.subplots(
+                                    figsize=(2, 2), facecolor="black",
+                                )
+                                cm = confusion_matrix(y_test, y_pred)
+                                sns.heatmap(
+                                    cm,
+                                    annot=True,
+                                    fmt="d",
+                                    cmap="copper",
+                                    xticklabels=CLASS_NAMES,
+                                    yticklabels=CLASS_NAMES,
+                                    ax=ax,
+                                    cbar=False,
+                                    annot_kws={"color": "white", "fontsize": 8},
+                                )
+                                ax.set_xlabel("Predicted", color="white")
+                                ax.set_ylabel("True Label", color="white")
+                                ax.tick_params(colors="white", labelsize=8)
+                                ax.tick_params(
+                                    which="both",
+                                    length=0,
+                                )
+                                st.pyplot(fig, width="content")
+                                plt.close(fig)
 
-                            gc.collect()
+                                gc.collect()
+                                Path(model_path).unlink(missing_ok=True)
+                                Path(results_path).unlink(missing_ok=True)
+                            except Exception as e:
+                                st.error(f"Error evaluating model: {e}")
+                                gc.collect()
+                    except:
+                        pass
+                    finally:
+                        store["is_evaluating"] = False
+                        store["eval_start_time"] = None
+                        gc.collect()
+                        if 'model_path' in locals():
                             Path(model_path).unlink(missing_ok=True)
+                        if 'results_path' in locals():
                             Path(results_path).unlink(missing_ok=True)
-                        except Exception as e:
-                            st.error(f"Error evaluating model: {e}")
-                            gc.collect()
-                except:
-                    pass
-                finally:
-                    store["is_evaluating"] = False
-                    store["eval_start_time"] = None
-                    gc.collect()
-                    if 'model_path' in locals():
-                        Path(model_path).unlink(missing_ok=True)
-                    if 'results_path' in locals():
-                        Path(results_path).unlink(missing_ok=True)
-                    if 'progress_path' in locals():
-                        Path(progress_path).unlink(missing_ok=True)
+                        if 'progress_path' in locals():
+                            Path(progress_path).unlink(missing_ok=True)
 
         plot_submissions(st.session_state.user_name)
         show_leaderboard()
