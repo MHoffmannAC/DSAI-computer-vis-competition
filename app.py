@@ -402,13 +402,13 @@ def render_html_metric_banner(score, baseline_score, label):
     if diff > 0.05:
         color = "#155724"
         bg = "#d4edda"
-    elif diff >= -0.01:
+    elif diff >= -0.015:
         color = "#28a745"
         bg = "#e2f0d9"
-    elif diff >= -0.03:
+    elif diff >= -0.035:
         color = "#ffc107"
         bg = "#fff3cd"
-    elif diff >= -0.10:
+    elif diff >= -0.075:
         color = "#fd7e14"
         bg = "#ffe8d6"
     else:
@@ -420,7 +420,9 @@ def render_html_metric_banner(score, baseline_score, label):
         <div style="background-color:{bg}; padding:12px; border-radius:5px; border-left:5px solid {color}; margin-bottom:10px;">
             <h4 style="margin:0 0 5px 0; color:#333;">{label}</h4>
             <p style="margin:0; font-size:18px; font-weight:bold; color:{color};">
-                Total Accuracy: {score:.2%} ({diff:+.2%} vs Baseline)
+                Total Accuracy: {score:.2%}
+                <br>
+                ({diff:+.2%} vs Baseline)
             </p>
         </div>
         """,
@@ -520,7 +522,7 @@ def main() -> None:
                     st.session_state.deep_handedness_data = None
                     st.session_state.deep_perp_data = None
                     st.session_state.deep_inversion_data = None
-                    
+
                     st.session_state.waiting_for_handedness = False
                     st.session_state.trigger_handedness_eval = False
                     st.session_state.waiting_for_perp = False
@@ -601,9 +603,9 @@ def main() -> None:
         # ==== ADVANCED DIAGNOSTICS CONTROL CENTER PANEL ====
         if st.session_state.get("baseline_run_data") is not None:
             st.divider()
-            st.header("🔍 Advanced Diagnostic Robustness Stress-Testing", anchor=False)
+            st.header("🔍 Advanced Diagnostic: Robustness Stress-Testing", anchor=False)
             st.write("Analyze your network's vulnerabilities against variance in hand profiles, perpendicular orientations, and total canvas inversions.")
-            
+
             saved_model_path = st.session_state.saved_model_path
             baseline_run = st.session_state.baseline_run_data
             acc = baseline_run["overall_accuracy"]
@@ -613,7 +615,7 @@ def main() -> None:
             if st.session_state.get("deep_handedness_data") is None:
                 if st.session_state.get("waiting_for_handedness"):
                     if store["eval_lock"].locked():
-                        st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically in 3 seconds...")
+                        st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically...")
                         time.sleep(3)
                         st.rerun()
                     else:
@@ -696,16 +698,14 @@ def main() -> None:
                     render_matrix_and_metric(
                         left_y_true, left_y_pred, "Left-Handed Images", left_acc, acc
                     )
-                    st.caption(f"• Real Left-Handed Samples Accuracy: **{real_left_acc:.2%}**")
+                    st.caption(f"• Real Left-Handed Samples: **{real_left_acc:.2%}** ({base_left_correct}/{base_left_total})")
                     st.caption(f"• Simulated Left-Handed Samples (Flipped Rights): **{sim_left_acc:.2%}**")
-                    st.caption(f"Baseline portion: {base_left_correct}/{base_left_total} accurate")
                 with col_h2:
                     render_matrix_and_metric(
                         right_y_true, right_y_pred, "Right-Handed Images", right_acc, acc
                     )
-                    st.caption(f"• Real Right-Handed Samples Accuracy: **{real_right_acc:.2%}**")
+                    st.caption(f"• Real Right-Handed Samples: **{real_right_acc:.2%}** ({base_right_correct}/{base_right_total})")
                     st.caption(f"• Simulated Right-Handed Samples (Flipped Lefts): **{sim_right_acc:.2%}**")
-                    st.caption(f"Baseline portion: {base_right_correct}/{base_right_total} accurate")
 
             # --- STEP 2: PERPENDICULAR ORIENTATIONS OF HANDS ---
             st.write("")
@@ -830,9 +830,11 @@ def main() -> None:
                         rot_180_pred.append(p["y_pred"])
                 rot_180_acc = np.mean(np.array(rot_180_true) == np.array(rot_180_pred)) if rot_180_true else 0.0
 
-                render_matrix_and_metric(
-                    rot_180_true, rot_180_pred, "Combined Upside-Down Accuracy", rot_180_acc, acc
-                )
+                col_r1, col_r2 = st.columns(2)
+                with col_r1:
+                    render_matrix_and_metric(
+                        rot_180_true, rot_180_pred, "Upside-Down Accuracy", rot_180_acc, acc
+                    )
 
 
 if __name__ == "__main__":
