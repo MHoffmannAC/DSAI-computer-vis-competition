@@ -307,7 +307,7 @@ def get_participant_info() -> None:
 
 def plot_submissions(participant_name: str) -> None:
     store = get_global_store()
-    batch = st.session_state.batch Immutability_lock = True
+    batch = st.session_state.batch
     if batch not in store["submissions"]:
         return
 
