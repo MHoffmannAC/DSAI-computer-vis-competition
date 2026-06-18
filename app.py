@@ -517,90 +517,79 @@ def main() -> None:
                             gc.collect()
 
                             try:
-
-                                results_path = tempfile.NamedTemporaryFile(
-                                    suffix=".json",
-                                    delete=False,
-                                ).name
-
-                                progress_path = results_path.replace(".json", "_progress.json")
-
-                                process = subprocess.Popen(
-                                    [
-                                        sys.executable,
-                                        "evaluator.py",
-                                        model_path,
-                                        model_type,
-                                        str(apply_preprocess),
-                                        results_path,
-                                        progress_path,
-                                    ],
-                                    stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE,
-                                    text=True,
-                                )
+                                # Define matrix loops
+                                flip_options = ["False", "True"]
+                                rotate_options = ["0", "90", "180", "270"]
+                                total_runs = len(flip_options) * len(rotate_options)
+                                run_idx = 0
 
                                 progress_bar = st.progress(0)
                                 status_text = st.empty()
 
-                                status_text.info("Loading model...")
+                                raw_matrix_results = []
 
-                                while process.poll() is None:
+                                # Execute distinct isolated subprocesses to keep memory usage low
+                                for flip_val in flip_options:
+                                    for rot_val in rotate_options:
+                                        run_idx += 1
+                                        status_text.info(
+                                            f"Running Combo [{run_idx}/{total_runs}]: "
+                                            f"Flip={flip_val} | Rotate={rot_val}°"
+                                        )
 
-                                    if Path(progress_path).exists():
-                                        try:
-                                            try:
-                                                with open(progress_path, "r") as f:
-                                                    progress = json.load(f)
-                                            except (json.JSONDecodeError, FileNotFoundError):
-                                                continue
+                                        results_path = tempfile.NamedTemporaryFile(suffix=".json", delete=False).name
 
-                                            progress_bar.progress(progress["progress"])
+                                        process = subprocess.run([
+                                            sys.executable, "evaluator.py",
+                                            "--model_path", model_path,
+                                            "--model_type", model_type,
+                                            "--apply_preprocess", str(apply_preprocess),
+                                            "--flip", flip_val,
+                                            "--rotate", rot_val,
+                                            "--output_json", results_path
+                                        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-                                            status_text.write(
-                                                f"Image {progress['done']}/{progress['total']} "
-                                                f"| Current accuracy: {progress['accuracy']:.2%}"
-                                            )
+                                        if process.returncode != 0:
+                                            st.error(f"Error on Combo Flip={flip_val}, Rotate={rot_val}°: {process.stderr}")
+                                            raise RuntimeError("Subprocess worker evaluation failure")
 
-                                        except Exception:
-                                            pass
+                                        with open(results_path, "r") as f:
+                                            combo_data = json.load(f)
+                                            raw_matrix_results.append(combo_data)
 
-                                    time.sleep(0.5)
+                                        Path(results_path).unlink(missing_ok=True)
+                                        progress_bar.progress(run_idx / total_runs)
 
-                                stdout, stderr = process.communicate()
                                 progress_bar.progress(1.0)
-                                status_text.success("Evaluation complete!")
+                                status_text.success("All transformation runs complete!")
 
-                                if process.returncode != 0:
-                                    st.code(stderr)
-                                    raise RuntimeError("Evaluation failed")
-
-                                with open(results_path) as f:
-                                    results = json.load(f)
-
-                                acc = results["accuracy"]
-
-                                y_pred = np.array(results["y_pred"])
-                                y_test = np.array(results["y_true"])
-
-                                result = pd.DataFrame(
-                                    [
-                                        {
-                                            "accuracy": round(acc, 4),
-                                            "participant": st.session_state.user_name,
-                                            "batch": st.session_state.batch,
-                                            "submission_time": pd.Timestamp.now().isoformat(),
-                                            "model_type": model_type,
-                                        },
-                                    ],
+                                # --- POST-PROCESSING COMPILED METRICS ---
+                                # Isolate pure baseline configuration (Flip=False, Rotate=0)
+                                baseline_run = next(
+                                    r for r in raw_matrix_results 
+                                    if r["flip"] is False and r["rotate"] == 0
                                 )
 
+                                acc = baseline_run["overall_accuracy"]
+                                y_pred = [pred["y_pred"] for pred in baseline_run["predictions"].values()]
+                                y_test = [pred["y_true"] for pred in baseline_run["predictions"].values()]
+
+                                # 1. Update Leaderboard Entry
+                                result = pd.DataFrame([
+                                    {
+                                        "accuracy": round(acc, 4),
+                                        "participant": st.session_state.user_name,
+                                        "batch": st.session_state.batch,
+                                        "submission_time": pd.Timestamp.now().isoformat(),
+                                        "model_type": model_type,
+                                    },
+                                ])
                                 update_submissions(result)
-                                st.success(f"Success! Model Accuracy: {acc:.2%}")
-                                st.subheader("🧮 Confusion Matrix")
-                                fig, ax = plt.subplots(
-                                    figsize=(2, 2), facecolor="black",
-                                )
+                                st.success(f"Success! Model Baseline Accuracy: {acc:.2%}")
+
+                                # 2. Generate Confusion Matrix Visualization
+                                st.subheader("🧮 Baseline Confusion Matrix")
+                                fig, ax = plt.subplots(figsize=(2, 2), facecolor="black")
                                 cm = confusion_matrix(y_test, y_pred)
                                 sns.heatmap(
                                     cm,
@@ -616,18 +605,88 @@ def main() -> None:
                                 ax.set_xlabel("Predicted", color="white")
                                 ax.set_ylabel("True Label", color="white")
                                 ax.tick_params(colors="white", labelsize=8)
-                                ax.tick_params(
-                                    which="both",
-                                    length=0,
-                                )
+                                ax.tick_params(which="both", length=0)
                                 st.pyplot(fig, width="content")
                                 plt.close(fig)
 
+                                # 3. Advanced Diagnostic Stress-Testing Chart Summary
+                                with st.expander("🔍 Robustness Analysis & Stress-Testing"):
+                                    st.markdown(
+                                        "This overview breaks down how your model reacts to changes in orientation "
+                                        "and hand configurations compared to the clean **Baseline** dataset."
+                                    )
+
+                                    summary_stats = []
+
+                                    # A. Orientation Drop Values (Calculated across pure unflipped imagery batches)
+                                    for r in raw_matrix_results:
+                                        if r["flip"] is False:
+                                            lbl = f"Rotate {r['rotate']}°" if r['rotate'] > 0 else "Baseline (Clean Images)"
+                                            summary_stats.append({"Dataset Slice": lbl, "Accuracy (%)": r["overall_accuracy"] * 100})
+
+                                    # B. Cross-Referencing Embedded File-Level Native Handedness Metadata
+                                    unrotated_unflipped = next(r for r in raw_matrix_results if r["flip"] is False and r["rotate"] == 0)
+                                    unrotated_flipped = next(r for r in raw_matrix_results if r["flip"] is True and r["rotate"] == 0)
+
+                                    hand_metrics = {
+                                        "Left-Handed (Native Original)": {"correct": 0, "total": 0},
+                                        "Left-Handed (Simulated via Flip)": {"correct": 0, "total": 0},
+                                        "Right-Handed (Native Original)": {"correct": 0, "total": 0},
+                                        "Right-Handed (Simulated via Flip)": {"correct": 0, "total": 0},
+                                    }
+
+                                    # Compile Native Images
+                                    for fname, p in unrotated_unflipped["predictions"].items():
+                                        hand = p["native_handedness"]
+                                        if hand in ["Left", "Right"]:
+                                            key = f"{hand}-Handed (Native Original)"
+                                            hand_metrics[key]["total"] += 1
+                                            if p["correct"]: hand_metrics[key]["correct"] += 1
+
+                                    # Compile Flipped Images
+                                    for fname, p in unrotated_flipped["predictions"].items():
+                                        hand = p["native_handedness"]
+                                        if hand == "Left":
+                                            key = "Right-Handed (Simulated via Flip)"
+                                            hand_metrics[key]["total"] += 1
+                                            if p["correct"]: hand_metrics[key]["correct"] += 1
+                                        elif hand == "Right":
+                                            key = "Left-Handed (Simulated via Flip)"
+                                            hand_metrics[key]["total"] += 1
+                                            if p["correct"]: hand_metrics[key]["correct"] += 1
+
+                                    for lbl, counts in hand_metrics.items():
+                                        if counts["total"] > 0:
+                                            summary_stats.append({
+                                                "Dataset Slice": lbl,
+                                                "Accuracy (%)": (counts["correct"] / counts["total"]) * 100
+                                            })
+
+                                    # C. Max Combined Stressor Index (Flipped + 180 Rotation)
+                                    worst_case = next((r for r in raw_matrix_results if r["flip"] is True and r["rotate"] == 180), None)
+                                    if worst_case:
+                                        summary_stats.append({
+                                            "Dataset Slice": "Combined Stress: Flipped + 180°",
+                                            "Accuracy (%)": worst_case["overall_accuracy"] * 100
+                                        })
+
+                                    # Render Bar Graph Analytics Component
+                                    df_chart = pd.DataFrame(summary_stats)
+                                    bars = alt.Chart(df_chart).mark_bar().encode(
+                                        x=alt.X('Accuracy (%):Q', scale=alt.Scale(domain=[0, 100])),
+                                        y=alt.Y('Dataset Slice:N', sort='-x'),
+                                        color=alt.condition(
+                                            alt.datum['Dataset Slice'] == 'Baseline (Clean Images)',
+                                            alt.value('#1f77b4'),  
+                                            alt.value('#ff7f0e')   
+                                        )
+                                    )
+                                    st.altair_chart(bars, use_container_width=True)
+
                                 gc.collect()
                                 Path(model_path).unlink(missing_ok=True)
-                                Path(results_path).unlink(missing_ok=True)
                             except Exception as e:
-                                st.error(f"Error evaluating model: {e}")
+                                st.error(f"Error evaluating model matrix iterations: {e}")
                                 gc.collect()
                     except:
                         pass
@@ -639,8 +698,6 @@ def main() -> None:
                             Path(model_path).unlink(missing_ok=True)
                         if 'results_path' in locals():
                             Path(results_path).unlink(missing_ok=True)
-                        if 'progress_path' in locals():
-                            Path(progress_path).unlink(missing_ok=True)
 
         plot_submissions(st.session_state.user_name)
         show_leaderboard()
