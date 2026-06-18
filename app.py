@@ -397,7 +397,11 @@ def show_leaderboard() -> None:
         st.dataframe(at_view, width="stretch")
 
 
-def render_matrix_and_metric(y_true, y_pred, label, score, baseline_score):
+def render_matrix_and_metric(y_true, y_pred, label, score, baseline_score, dynamic_html_extra=""):
+    if not y_true or not y_pred:
+        st.warning(f"⚠️ No samples available to compile data evaluation matrix for: {label}")
+        return
+
     diff = score - baseline_score
     if diff > 0.05:
         color = "#155724"
@@ -417,11 +421,12 @@ def render_matrix_and_metric(y_true, y_pred, label, score, baseline_score):
 
     st.markdown(
         f"""
-        <div style="background-color:{bg}; padding:10px; border-radius:5px; border-left:5px solid {color}; margin-bottom:10px;">
-            <h4 style="margin:0; color:#333;">{label}</h4>
-            <p style="margin:5px 0 0 0; font-size:18px; font-weight:bold; color:{color};">
-                Accuracy: {score:.2%} ({diff:+.2%} vs Baseline)
+        <div style="background-color:{bg}; padding:12px; border-radius:5px; border-left:5px solid {color}; margin-bottom:10px;">
+            <h4 style="margin:0 0 5px 0; color:#333;">{label}</h4>
+            <p style="margin:0; font-size:18px; font-weight:bold; color:{color};">
+                Total Accuracy: {score:.2%} ({diff:+.2%} vs Baseline)
             </p>
+            {dynamic_html_extra}
         </div>
         """,
         unsafe_allow_html=True,
@@ -524,7 +529,7 @@ def main() -> None:
                     waiting_placeholder.empty()
 
                     try:
-                        with st.spinner("Analyzing baseline model performance..."):
+                        with st.spinner("Analyzing model performance..."):
                             with tempfile.NamedTemporaryFile(suffix=".keras", delete=False) as tmpf:
                                 tmpf.write(uploaded_file.getbuffer())
                                 saved_model_path = tmpf.name
@@ -560,9 +565,9 @@ def main() -> None:
                     y_pred = [pred["y_pred"] for pred in baseline_run["predictions"].values()]
                     y_test = [pred["y_true"] for pred in baseline_run["predictions"].values()]
 
-                    st.success(f"Success! Model Baseline Accuracy: {acc:.2%}")
+                    st.success(f"Success! Model Accuracy: {acc:.2%}")
 
-                    st.subheader("🧮 Baseline Confusion Matrix")
+                    st.subheader("🧮 Confusion Matrix")
                     fig, ax = plt.subplots(figsize=(2, 2), facecolor="black")
                     cm = confusion_matrix(y_test, y_pred)
                     sns.heatmap(
@@ -586,14 +591,17 @@ def main() -> None:
                     st.subheader("🔍 Advanced Diagnostic Robustness Stress-Testing")
 
                     if st.session_state.get("deep_analysis_data") is None:
-                        if st.button("Run deeper analysis matrix"):
+                        st.write("We provide here the possibility to analyze the robustness of your models further."
+                                 "This includes robustness wrt. handedness as well as wrt. image orientations."
+                                 "Run the analysis if you are curious how your model performs in such cases.")
+                        if st.button("Run deeper analysis"):
                             waiting_placeholder = st.empty()
                             lock_acquired = False
                             while not lock_acquired:
                                 lock_acquired = store["eval_lock"].acquire(blocking=False)
                                 if not lock_acquired:
                                     waiting_placeholder.warning(
-                                        "⏳ Server busy. Waiting to initiate matrix evaluation..."
+                                        "⏳ Server busy. Waiting to initiate deeper evaluation..."
                                     )
                                     time.sleep(3)
                             waiting_placeholder.empty()
@@ -618,7 +626,7 @@ def main() -> None:
                                 total_slices = len(slice_configs)
 
                                 for idx, (slice_name, f_val, r_val) in enumerate(slice_configs):
-                                    status_text.info(f"Processing evaluation slice [{idx+1}/{total_slices}]: Flip={f_val}, Rotate={r_val}°")
+                                    status_text.info(f"Processing evaluation slice [{idx+1}/{total_slices}]")
                                     slices[slice_name] = run_evaluation_process(
                                         saved_model_path, model_type, apply_preprocess, f_val, r_val
                                     )
@@ -637,63 +645,129 @@ def main() -> None:
                     else:
                         slices = st.session_state.deep_analysis_data
 
+                        # --- Handedness Profile ---
                         left_y_true, left_y_pred = [], []
                         right_y_true, right_y_pred = [], []
+
+                        real_left_true, real_left_pred = [], []
+                        sim_left_true, sim_left_pred = [], []
+                        real_right_true, real_right_pred = [], []
+                        sim_right_true, sim_right_pred = [], []
 
                         base_left_total, base_left_correct = 0, 0
                         base_right_total, base_right_correct = 0, 0
 
                         for fname, p in baseline_run["predictions"].items():
-                            hand = p["native_handedness"]
+                            hand = str(p.get("native_handedness", "Unknown")).strip().capitalize()
                             if hand == "Left":
                                 left_y_true.append(p["y_true"])
                                 left_y_pred.append(p["y_pred"])
+                                real_left_true.append(p["y_true"])
+                                real_left_pred.append(p["y_pred"])
                                 base_left_total += 1
                                 if p["correct"]: base_left_correct += 1
                             elif hand == "Right":
                                 right_y_true.append(p["y_true"])
                                 right_y_pred.append(p["y_pred"])
+                                real_right_true.append(p["y_true"])
+                                real_right_pred.append(p["y_pred"])
                                 base_right_total += 1
                                 if p["correct"]: base_right_correct += 1
 
                         for fname, p in slices["flipped_0"]["predictions"].items():
-                            hand = p["native_handedness"]
+                            hand = str(p.get("native_handedness", "Unknown")).strip().capitalize()
                             if hand == "Left":
                                 right_y_true.append(p["y_true"])
                                 right_y_pred.append(p["y_pred"])
+                                sim_right_true.append(p["y_true"])
+                                sim_right_pred.append(p["y_pred"])
                             elif hand == "Right":
                                 left_y_true.append(p["y_true"])
                                 left_y_pred.append(p["y_pred"])
+                                sim_left_true.append(p["y_true"])
+                                sim_left_pred.append(p["y_pred"])
 
                         left_acc = np.mean(np.array(left_y_true) == np.array(left_y_pred)) if left_y_true else 0.0
                         right_acc = np.mean(np.array(right_y_true) == np.array(right_y_pred)) if right_y_true else 0.0
+
+                        real_left_acc = np.mean(np.array(real_left_true) == np.array(real_left_pred)) if real_left_true else 0.0
+                        sim_left_acc = np.mean(np.array(sim_left_true) == np.array(sim_left_pred)) if sim_left_true else 0.0
+                        
+                        real_right_acc = np.mean(np.array(real_right_true) == np.array(real_right_pred)) if real_right_true else 0.0
+                        sim_right_acc = np.mean(np.array(sim_right_true) == np.array(sim_right_pred)) if sim_right_true else 0.0
+
+                        left_extra_html = f"""
+                        <div style="margin-top:6px; font-size:13px; color:#555; line-height:1.4;">
+                            • Real Left-Handed Samples Accuracy: <b>{real_left_acc:.2%}</b><br/>
+                            • Simulated Left-Handed Samples (Flipped Rights): <b>{sim_left_acc:.2%}</b>
+                        </div>
+                        """
+                        right_extra_html = f"""
+                        <div style="margin-top:6px; font-size:13px; color:#555; line-height:1.4;">
+                            • Real Right-Handed Samples Accuracy: <b>{real_right_acc:.2%}</b><br/>
+                            • Simulated Right-Handed Samples (Flipped Lefts): <b>{sim_right_acc:.2%}</b>
+                        </div>
+                        """
 
                         st.markdown("### Handedness Slice Profile")
                         col_h1, col_h2 = st.columns(2)
                         with col_h1:
                             render_matrix_and_metric(
-                                left_y_true, left_y_pred, "Left-Handed Profile (Visually Left)", left_acc, acc
+                                left_y_true, left_y_pred, "Left-Handed Images", left_acc, acc, left_extra_html
                             )
                             st.caption(f"Baseline portion: {base_left_correct}/{base_left_total} accurate")
                         with col_h2:
                             render_matrix_and_metric(
-                                right_y_true, right_y_pred, "Right-Handed Profile (Visually Right)", right_acc, acc
+                                right_y_true, right_y_pred, "Right-Handed Images", right_acc, acc, right_extra_html
                             )
                             st.caption(f"Baseline portion: {base_right_correct}/{base_right_total} accurate")
 
-                        rot_90_270_true, rot_90_270_pred = [], []
-                        for run in [slices["unflipped_90"], slices["unflipped_270"], slices["flipped_90"], slices["flipped_270"]]:
+                        # --- Perpendicular Slices (+90° and -90°/270°) ---
+                        # 1. Gather standalone +90° data
+                        rot_p90_true, rot_p90_pred = [], []
+                        for run in [slices["unflipped_90"], slices["flipped_90"]]:
                             for p in run["predictions"].values():
-                                rot_90_270_true.append(p["y_true"])
-                                rot_90_270_pred.append(p["y_pred"])
+                                rot_p90_true.append(p["y_true"])
+                                rot_p90_pred.append(p["y_pred"])
+                        rot_p90_acc = np.mean(np.array(rot_p90_true) == np.array(rot_p90_pred)) if rot_p90_true else 0.0
 
+                        # 2. Gather standalone -90° / 270° data
+                        rot_n90_true, rot_n90_pred = [], []
+                        for run in [slices["unflipped_270"], slices["flipped_270"]]:
+                            for p in run["predictions"].values():
+                                rot_n90_true.append(p["y_true"])
+                                rot_n90_pred.append(p["y_pred"])
+                        rot_n90_acc = np.mean(np.array(rot_n90_true) == np.array(rot_n90_pred)) if rot_n90_true else 0.0
+
+                        # 3. Gather combined data
+                        rot_90_270_true = rot_p90_true + rot_n90_true
+                        rot_90_270_pred = rot_p90_pred + rot_n90_pred
                         rot_90_270_acc = np.mean(np.array(rot_90_270_true) == np.array(rot_90_270_pred)) if rot_90_270_true else 0.0
 
-                        st.markdown("### Perpendicular Variations (90° & 270° Slices)")
+                        perp_extra_html = f"""
+                        <div style="margin-top:6px; font-size:13px; color:#555; line-height:1.4;">
+                            • Clockwise (+90°) Variations Accuracy: <b>{rot_p90_acc:.2%}</b><br/>
+                            • Counter-Clockwise (-90°) Variations Accuracy: <b>{rot_n90_acc:.2%}</b>
+                        </div>
+                        """
+
+                        st.markdown("### Perpendicular Orientations of Hands (90° & -90°)")
                         render_matrix_and_metric(
-                            rot_90_270_true, rot_90_270_pred, "Combined Vertical Alignments", rot_90_270_acc, acc
+                            rot_90_270_true, rot_90_270_pred, "Combined Accuracy", rot_90_270_acc, acc, perp_extra_html
                         )
 
+                        # Display sub-breakdown matrices side-by-side
+                        col_r1, col_r2 = st.columns(2)
+                        with col_r1:
+                            render_matrix_and_metric(
+                                rot_p90_true, rot_p90_pred, "Clockwise (+90°)", rot_p90_acc, acc
+                            )
+                        with col_r2:
+                            render_matrix_and_metric(
+                                rot_n90_true, rot_n90_pred, "Counter-Clockwise (-90°)", rot_n90_acc, acc
+                            )
+
+                        # --- Complete Inversions (180°) ---
                         rot_180_true, rot_180_pred = [], []
                         for run in [slices["unflipped_180"], slices["flipped_180"]]:
                             for p in run["predictions"].values():
@@ -702,9 +776,9 @@ def main() -> None:
 
                         rot_180_acc = np.mean(np.array(rot_180_true) == np.array(rot_180_pred)) if rot_180_true else 0.0
 
-                        st.markdown("### Complete Inversion Variations (180° Slices)")
+                        st.markdown("### Upside-down Hands")
                         render_matrix_and_metric(
-                            rot_180_true, rot_180_pred, "Combined Upside-Down Alignment", rot_180_acc, acc
+                            rot_180_true, rot_180_pred, "Combined Upside-Down Accuracy", rot_180_acc, acc
                         )
 
         plot_submissions(st.session_state.user_name)
