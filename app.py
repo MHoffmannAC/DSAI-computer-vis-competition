@@ -457,7 +457,7 @@ def render_matrix_and_metric(y_true, y_pred, label, score, baseline_score):
     plt.close(fig)
 
 
-def run_evaluation_process(model_path, model_type, apply_preprocess, flip_val, rot_val):
+def run_evaluation_process(model_path, model_type, apply_preprocess, flip_val, rot_val, zoom_val="normal"):
     results_path = tempfile.NamedTemporaryFile(suffix=".json", delete=False).name
     try:
         process = subprocess.run([
@@ -467,6 +467,7 @@ def run_evaluation_process(model_path, model_type, apply_preprocess, flip_val, r
             "--apply_preprocess", str(apply_preprocess),
             "--flip", flip_val,
             "--rotate", rot_val,
+            "--zoom", zoom_val,
             "--output_json", results_path
         ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
@@ -521,6 +522,7 @@ def main() -> None:
                     st.session_state.baseline_run_data = None
                     st.session_state.deep_handedness_data = None
                     st.session_state.deep_perp_data = None
+                    st.session_state.deep_zoom_data = None
                     st.session_state.deep_inversion_data = None
 
                 if st.session_state.get("baseline_run_data") is None:
@@ -596,202 +598,265 @@ def main() -> None:
         # ==== ADVANCED DIAGNOSTICS CONTROL CENTER PANEL ====
         if st.session_state.get("baseline_run_data") is not None:
             st.divider()
-            st.header("🔍 Advanced Diagnostic: Robustness Stress-Testing", anchor=False)
-            st.write("Analyze your network's vulnerabilities against variance in hand profiles, perpendicular orientations, and total canvas inversions.")
+            
+            # Master Visibility control toggle handles entire sub-suite section cleanly
+            show_diagnostics = st.toggle("🔍 Show Advanced Diagnostic Robustness Stress-Testing", value=False)
+            
+            if show_diagnostics:
+                st.header("🔍 Advanced Diagnostic: Robustness Stress-Testing", anchor=False)
+                st.write("Analyze your network's vulnerabilities against variance in hand profiles, perpendicular orientations, and total canvas inversions.")
 
-            saved_model_path = st.session_state.saved_model_path
-            baseline_run = st.session_state.baseline_run_data
-            acc = baseline_run["overall_accuracy"]
+                saved_model_path = st.session_state.saved_model_path
+                baseline_run = st.session_state.baseline_run_data
+                acc = baseline_run["overall_accuracy"]
 
-            # --- STEP 1: HANDEDNESS INVARIANT VERIFICATION ---
-            st.markdown("### 🖐️ Handedness Invariant Verification")
-            if st.session_state.get("deep_handedness_data") is None:
-                if st.button("Evaluate Handedness Robustness"):
-                    waiting_placeholder = st.empty()
-                    if store["eval_lock"].locked():
-                        waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
-                    
-                    with store["eval_lock"]:
-                        waiting_placeholder.empty()
-                        progress_bar = st.progress(0)
-                        status_text = st.info("Running Handedness matrix configuration...")
-                        flipped_0 = run_evaluation_process(saved_model_path, model_type, apply_preprocess, "True", "0")
-                        progress_bar.progress(1.0)
-                        status_text.empty()
-                        progress_bar.empty()
-                        st.session_state.deep_handedness_data = {"flipped_0": flipped_0}
-                    st.rerun()
-            else:
-                handedness_slices = st.session_state.deep_handedness_data
-                left_y_true, left_y_pred = [], []
-                right_y_true, right_y_pred = [], []
-
-                real_left_true, real_left_pred = [], []
-                sim_left_true, sim_left_pred = [], []
-                real_right_true, real_right_pred = [], []
-                sim_right_true, sim_right_pred = [], []
-
-                base_left_total, base_left_correct = 0, 0
-                base_right_total, base_right_correct = 0, 0
-
-                for fname, p in baseline_run["predictions"].items():
-                    hand = str(p.get("native_handedness", "Unknown")).strip().capitalize()
-                    if hand == "Left":
-                        left_y_true.append(p["y_true"])
-                        left_y_pred.append(p["y_pred"])
-                        real_left_true.append(p["y_true"])
-                        real_left_pred.append(p["y_true"])
-                        real_left_pred[-1] = p["y_pred"]
-                        base_left_total += 1
-                        if p["correct"]: base_left_correct += 1
-                    elif hand == "Right":
-                        right_y_true.append(p["y_true"])
-                        right_y_pred.append(p["y_pred"])
-                        real_right_true.append(p["y_true"])
-                        real_right_pred.append(p["y_true"])
-                        real_right_pred[-1] = p["y_pred"]
-                        base_right_total += 1
-                        if p["correct"]: base_right_correct += 1
-
-                for fname, p in handedness_slices["flipped_0"]["predictions"].items():
-                    hand = str(p.get("native_handedness", "Unknown")).strip().capitalize()
-                    if hand == "Left":
-                        right_y_true.append(p["y_true"])
-                        right_y_pred.append(p["y_pred"])
-                        sim_right_true.append(p["y_true"])
-                        sim_right_pred.append(p["y_pred"])
-                    elif hand == "Right":
-                        left_y_true.append(p["y_true"])
-                        left_y_pred.append(p["y_pred"])
-                        sim_left_true.append(p["y_true"])
-                        sim_left_pred.append(p["y_pred"])
-
-                left_acc = np.mean(np.array(left_y_true) == np.array(left_y_pred)) if left_y_true else 0.0
-                right_acc = np.mean(np.array(right_y_true) == np.array(right_y_pred)) if right_y_true else 0.0
-
-                real_left_acc = np.mean(np.array(real_left_true) == np.array(real_left_pred)) if real_left_true else 0.0
-                sim_left_acc = np.mean(np.array(sim_left_true) == np.array(sim_left_pred)) if sim_left_true else 0.0
-                real_right_acc = np.mean(np.array(real_right_true) == np.array(real_right_pred)) if real_right_true else 0.0
-                sim_right_acc = np.mean(np.array(sim_right_true) == np.array(sim_right_pred)) if sim_right_true else 0.0
-
-                col_h1, col_h2 = st.columns(2)
-                with col_h1:
-                    render_matrix_and_metric(
-                        left_y_true, left_y_pred, "Left-Handed Images", left_acc, acc
-                    )
-                    st.caption(f"• Real Left-Handed Samples: **{real_left_acc:.2%}** ({base_left_correct}/{base_left_total})")
-                    st.caption(f"• Simulated Left-Handed Samples (Flipped Rights): **{sim_left_acc:.2%}**")
-                with col_h2:
-                    render_matrix_and_metric(
-                        right_y_true, right_y_pred, "Right-Handed Images", right_acc, acc
-                    )
-                    st.caption(f"• Real Right-Handed Samples: **{real_right_acc:.2%}** ({base_right_correct}/{base_right_total})")
-                    st.caption(f"• Simulated Right-Handed Samples (Flipped Lefts): **{sim_right_acc:.2%}**")
-
-            # --- STEP 2: PERPENDICULAR ORIENTATIONS OF HANDS ---
-            st.write("")
-            st.markdown("### 🫱 Horizontal Orientations of Hands (90° & -90°)")
-            if st.session_state.get("deep_perp_data") is None:
-                if st.button("Evaluate Perpendicular Robustness"):
-                    waiting_placeholder = st.empty()
-                    if store["eval_lock"].locked():
-                        waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
-                    
-                    with store["eval_lock"]:
-                        waiting_placeholder.empty()
-                        perp_configs = [
-                            ("unflipped_90", "False", "90"),
-                            ("unflipped_270", "False", "270"),
-                            ("flipped_90", "True", "90"),
-                            ("flipped_270", "True", "270")
-                        ]
-                        slices_p = {}
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
+                # --- STEP 1: HANDEDNESS INVARIANT VERIFICATION ---
+                st.markdown("### 🖐️ Handedness Invariant Verification")
+                if st.session_state.get("deep_handedness_data") is None:
+                    if st.button("Evaluate Handedness Robustness"):
+                        waiting_placeholder = st.empty()
+                        if store["eval_lock"].locked():
+                            waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
                         
-                        for idx, (s_name, f_v, r_v) in enumerate(perp_configs):
-                            status_text.info(f"Processing evaluation slice [{idx + 1}/{len(perp_configs)}]")
-                            slices_p[s_name] = run_evaluation_process(saved_model_path, model_type, apply_preprocess, f_v, r_v)
-                            progress_bar.progress((idx + 1) / len(perp_configs))
+                        with store["eval_lock"]:
+                            waiting_placeholder.empty()
+                            progress_bar = st.progress(0)
+                            status_text = st.info("Running Handedness matrix configuration...")
+                            flipped_0 = run_evaluation_process(saved_model_path, model_type, apply_preprocess, "True", "0")
+                            progress_bar.progress(1.0)
+                            status_text.empty()
+                            progress_bar.empty()
+                            st.session_state.deep_handedness_data = {"flipped_0": flipped_0}
+                        st.rerun()
+                else:
+                    handedness_slices = st.session_state.deep_handedness_data
+                    left_y_true, left_y_pred = [], []
+                    right_y_true, right_y_pred = [], []
+
+                    real_left_true, real_left_pred = [], []
+                    sim_left_true, sim_left_pred = [], []
+                    real_right_true, real_right_pred = [], []
+                    sim_right_true, sim_right_pred = [], []
+
+                    base_left_total, base_left_correct = 0, 0
+                    base_right_total, base_right_correct = 0, 0
+
+                    for fname, p in baseline_run["predictions"].items():
+                        hand = str(p.get("native_handedness", "Unknown")).strip().capitalize()
+                        if hand == "Left":
+                            left_y_true.append(p["y_true"])
+                            left_y_pred.append(p["y_pred"])
+                            real_left_true.append(p["y_true"])
+                            real_left_pred.append(p["y_true"])
+                            real_left_pred[-1] = p["y_pred"]
+                            base_left_total += 1
+                            if p["correct"]: base_left_correct += 1
+                        elif hand == "Right":
+                            right_y_true.append(p["y_true"])
+                            right_y_pred.append(p["y_pred"])
+                            real_right_true.append(p["y_true"])
+                            real_right_pred.append(p["y_true"])
+                            real_right_pred[-1] = p["y_pred"]
+                            base_right_total += 1
+                            if p["correct"]: base_right_correct += 1
+
+                    for fname, p in handedness_slices["flipped_0"]["predictions"].items():
+                        hand = str(p.get("native_handedness", "Unknown")).strip().capitalize()
+                        if hand == "Left":
+                            right_y_true.append(p["y_true"])
+                            right_y_pred.append(p["y_pred"])
+                            sim_right_true.append(p["y_true"])
+                            sim_right_pred.append(p["y_pred"])
+                        elif hand == "Right":
+                            left_y_true.append(p["y_true"])
+                            left_y_pred.append(p["y_pred"])
+                            sim_left_true.append(p["y_true"])
+                            sim_left_pred.append(p["y_pred"])
+
+                    left_acc = np.mean(np.array(left_y_true) == np.array(left_y_pred)) if left_y_true else 0.0
+                    right_acc = np.mean(np.array(right_y_true) == np.array(right_y_pred)) if right_y_true else 0.0
+
+                    real_left_acc = np.mean(np.array(real_left_true) == np.array(real_left_pred)) if real_left_true else 0.0
+                    sim_left_acc = np.mean(np.array(sim_left_true) == np.array(sim_left_pred)) if sim_left_true else 0.0
+                    real_right_acc = np.mean(np.array(real_right_true) == np.array(real_right_pred)) if real_right_true else 0.0
+                    sim_right_acc = np.mean(np.array(sim_right_true) == np.array(sim_right_pred)) if sim_right_true else 0.0
+
+                    col_h1, col_h2 = st.columns(2)
+                    with col_h1:
+                        render_matrix_and_metric(
+                            left_y_true, left_y_pred, "Left-Handed Images", left_acc, acc
+                        )
+                        st.caption(f"• Real Left-Handed Samples: **{real_left_acc:.2%}** ({base_left_correct}/{base_left_total})")
+                        st.caption(f"• Simulated Left-Handed Samples (Flipped Rights): **{sim_left_acc:.2%}**")
+                    with col_h2:
+                        render_matrix_and_metric(
+                            right_y_true, right_y_pred, "Right-Handed Images", right_acc, acc
+                        )
+                        st.caption(f"• Real Right-Handed Samples: **{real_right_acc:.2%}** ({base_right_correct}/{base_right_total})")
+                        st.caption(f"• Simulated Right-Handed Samples (Flipped Lefts): **{sim_right_acc:.2%}**")
+
+                # --- STEP 2: HORIZONTAL ORIENTATIONS OF HANDS ---
+                st.write("")
+                st.markdown("### 🫱 Horizontal Orientations of Hands (90° & -90°)")
+                if st.session_state.get("deep_perp_data") is None:
+                    if st.button("Evaluate Perpendicular Robustness"):
+                        waiting_placeholder = st.empty()
+                        if store["eval_lock"].locked():
+                            waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
                         
-                        status_text.empty()
-                        progress_bar.empty()
-                        st.session_state.deep_perp_data = slices_p
-                    st.rerun()
-            else:
-                perp_slices = st.session_state.deep_perp_data
-                rot_p90_true, rot_p90_pred = [], []
-                for run in [perp_slices["unflipped_90"], perp_slices["flipped_90"]]:
-                    for p in run["predictions"].values():
-                        rot_p90_true.append(p["y_true"])
-                        rot_p90_pred.append(p["y_pred"])
-                rot_p90_acc = np.mean(np.array(rot_p90_true) == np.array(rot_p90_pred)) if rot_p90_true else 0.0
+                        with store["eval_lock"]:
+                            waiting_placeholder.empty()
+                            perp_configs = [
+                                ("unflipped_90", "False", "90"),
+                                ("unflipped_270", "False", "270"),
+                                ("flipped_90", "True", "90"),
+                                ("flipped_270", "True", "270")
+                            ]
+                            slices_p = {}
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            for idx, (s_name, f_v, r_v) in enumerate(perp_configs):
+                                status_text.info(f"Processing evaluation slice [{idx + 1}/{len(perp_configs)}]: Flip={f_v}, Rotate={r_v}°")
+                                slices_p[s_name] = run_evaluation_process(saved_model_path, model_type, apply_preprocess, f_v, r_v)
+                                progress_bar.progress((idx + 1) / len(perp_configs))
+                            
+                            status_text.empty()
+                            progress_bar.empty()
+                            st.session_state.deep_perp_data = slices_p
+                        st.rerun()
+                else:
+                    perp_slices = st.session_state.deep_perp_data
+                    rot_p90_true, rot_p90_pred = [], []
+                    for run in [perp_slices["unflipped_90"], perp_slices["flipped_90"]]:
+                        for p in run["predictions"].values():
+                            rot_p90_true.append(p["y_true"])
+                            rot_p90_pred.append(p["y_pred"])
+                    rot_p90_acc = np.mean(np.array(rot_p90_true) == np.array(rot_p90_pred)) if rot_p90_true else 0.0
 
-                rot_n90_true, rot_n90_pred = [], []
-                for run in [perp_slices["unflipped_270"], perp_slices["flipped_270"]]:
-                    for p in run["predictions"].values():
-                        rot_n90_true.append(p["y_true"])
-                        rot_n90_pred.append(p["y_pred"])
-                rot_n90_acc = np.mean(np.array(rot_n90_true) == np.array(rot_n90_pred)) if rot_n90_true else 0.0
+                    rot_n90_true, rot_n90_pred = [], []
+                    for run in [perp_slices["unflipped_270"], perp_slices["flipped_270"]]:
+                        for p in run["predictions"].values():
+                            rot_n90_true.append(p["y_true"])
+                            rot_n90_pred.append(p["y_pred"])
+                    rot_n90_acc = np.mean(np.array(rot_n90_true) == np.array(rot_n90_pred)) if rot_n90_true else 0.0
 
-                rot_90_270_true = rot_p90_true + rot_n90_true
-                rot_90_270_pred = rot_p90_pred + rot_n90_pred
-                rot_90_270_acc = np.mean(np.array(rot_90_270_true) == np.array(rot_90_270_pred)) if rot_90_270_true else 0.0
+                    rot_90_270_true = rot_p90_true + rot_n90_true
+                    rot_90_270_pred = rot_p90_pred + rot_n90_pred
+                    rot_90_270_acc = np.mean(np.array(rot_90_270_true) == np.array(rot_90_270_pred)) if rot_90_270_true else 0.0
 
-                render_html_metric_banner(rot_90_270_acc, acc, "Combined Accuracy")
+                    render_html_metric_banner(rot_90_270_acc, acc, "Combined Accuracy")
 
-                col_r1, col_r2 = st.columns(2)
-                with col_r1:
-                    render_matrix_and_metric(
-                        rot_p90_true, rot_p90_pred, "Clockwise (+90°)", rot_p90_acc, acc
-                    )
-                with col_r2:
-                    render_matrix_and_metric(
-                        rot_n90_true, rot_n90_pred, "Counter-Clockwise (-90°)", rot_n90_acc, acc
-                    )
+                    col_r1, col_r2 = st.columns(2)
+                    with col_r1:
+                        render_matrix_and_metric(
+                            rot_p90_true, rot_p90_pred, "Clockwise (+90°)", rot_p90_acc, acc
+                        )
+                    with col_r2:
+                        render_matrix_and_metric(
+                            rot_n90_true, rot_n90_pred, "Counter-Clockwise (-90°)", rot_n90_acc, acc
+                        )
 
-            # --- STEP 3: UPSIDE-DOWN HANDS ---
-            st.write("")
-            st.markdown("### 🙃 Upside-down Hands")
-            if st.session_state.get("deep_inversion_data") is None:
-                if st.button("Evaluate Inversion Robustness"):
-                    waiting_placeholder = st.empty()
-                    if store["eval_lock"].locked():
-                        waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
-                    
-                    with store["eval_lock"]:
-                        waiting_placeholder.empty()
-                        inv_configs = [
-                            ("unflipped_180", "False", "180"),
-                            ("flipped_180", "True", "180")
-                        ]
-                        slices_i = {}
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
+                # --- STEP 3: UPSIDE-DOWN HANDS ---
+                st.write("")
+                st.markdown("### 🙃 Upside-down Hands")
+                if st.session_state.get("deep_inversion_data") is None:
+                    if st.button("Evaluate Inversion Robustness"):
+                        waiting_placeholder = st.empty()
+                        if store["eval_lock"].locked():
+                            waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
                         
-                        for idx, (s_name, f_v, r_v) in enumerate(inv_configs):
-                            status_text.info(f"Processing evaluation slice [{idx + 1}/{len(inv_configs)}]")
-                            slices_i[s_name] = run_evaluation_process(saved_model_path, model_type, apply_preprocess, f_v, r_v)
-                            progress_bar.progress((idx + 1) / len(inv_configs))
-                        
-                        status_text.empty()
-                        progress_bar.empty()
-                        st.session_state.deep_inversion_data = slices_i
-                    st.rerun()
-            else:
-                inv_slices = st.session_state.deep_inversion_data
-                rot_180_true, rot_180_pred = [], []
-                for run in [inv_slices["unflipped_180"], inv_slices["flipped_180"]]:
-                    for p in run["predictions"].values():
-                        rot_180_true.append(p["y_true"])
-                        rot_180_pred.append(p["y_pred"])
-                rot_180_acc = np.mean(np.array(rot_180_true) == np.array(rot_180_pred)) if rot_180_true else 0.0
+                        with store["eval_lock"]:
+                            waiting_placeholder.empty()
+                            inv_configs = [
+                                ("unflipped_180", "False", "180"),
+                                ("flipped_180", "True", "180")
+                            ]
+                            slices_i = {}
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            for idx, (s_name, f_v, r_v) in enumerate(inv_configs):
+                                status_text.info(f"Processing evaluation slice [{idx + 1}/{len(inv_configs)}]: Flip={f_v}, Rotate={r_v}°")
+                                slices_i[s_name] = run_evaluation_process(saved_model_path, model_type, apply_preprocess, f_v, r_v)
+                                progress_bar.progress((idx + 1) / len(inv_configs))
+                            
+                            status_text.empty()
+                            progress_bar.empty()
+                            st.session_state.deep_inversion_data = slices_i
+                        st.rerun()
+                else:
+                    inv_slices = st.session_state.deep_inversion_data
+                    rot_180_true, rot_180_pred = [], []
+                    for run in [inv_slices["unflipped_180"], inv_slices["flipped_180"]]:
+                        for p in run["predictions"].values():
+                            rot_180_true.append(p["y_true"])
+                            rot_180_pred.append(p["y_pred"])
+                    rot_180_acc = np.mean(np.array(rot_180_true) == np.array(rot_180_pred)) if rot_180_true else 0.0
 
-                col_r1, col_r2 = st.columns(2)
-                with col_r1:
-                    render_matrix_and_metric(
-                        rot_180_true, rot_180_pred, "Upside-Down Accuracy", rot_180_acc, acc
-                    )
+                    col_r1, col_r2 = st.columns(2)
+                    with col_r1:
+                        render_matrix_and_metric(
+                            rot_180_true, rot_180_pred, "Upside-Down Accuracy", rot_180_acc, acc
+                        )
+
+                # --- STEP 4: DISTANCE & FRAMING INVARIANCE (ZOOM) ---
+                st.write("")
+                st.markdown("### 📏 Distance & Framing Invariance (Scale/Zoom)")
+                if st.session_state.get("deep_zoom_data") is None:
+                    if st.button("Evaluate Scale Robustness"):
+                        waiting_placeholder = st.empty()
+                        if store["eval_lock"].locked():
+                            waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
+                        
+                        with store["eval_lock"]:
+                            waiting_placeholder.empty()
+                            zoom_configs = [
+                                ("zoomed_in", "in"),
+                                ("zoomed_out", "out")
+                            ]
+                            slices_z = {}
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            for idx, (s_name, zoom_flag) in enumerate(zoom_configs):
+                                status_text.info(f"Processing scaling evaluation matrix [{idx + 1}/{len(zoom_configs)}]: Zoom Mode='{zoom_flag}'")
+                                slices_z[s_name] = run_evaluation_process(saved_model_path, model_type, apply_preprocess, "False", "0", zoom_flag)
+                                progress_bar.progress((idx + 1) / len(zoom_configs))
+                            
+                            status_text.empty()
+                            progress_bar.empty()
+                            st.session_state.deep_zoom_data = slices_z
+                        st.rerun()
+                else:
+                    zoom_slices = st.session_state.deep_zoom_data
+                    zin_true, zin_pred = [], []
+                    for p in zoom_slices["zoomed_in"]["predictions"].values():
+                        zin_true.append(p["y_true"])
+                        zin_pred.append(p["y_pred"])
+                    zin_acc = np.mean(np.array(zin_true) == np.array(zin_pred)) if zin_true else 0.0
+
+                    zout_true, zout_pred = [], []
+                    for p in zoom_slices["zoomed_out"]["predictions"].values():
+                        zout_true.append(p["y_true"])
+                        zout_pred.append(p["y_pred"])
+                    zout_acc = np.mean(np.array(zout_true) == np.array(zout_pred)) if zout_true else 0.0
+
+                    total_zoom_true = zin_true + zout_true
+                    total_zoom_pred = zin_pred + zout_pred
+                    total_zoom_acc = np.mean(np.array(total_zoom_true) == np.array(total_zoom_pred)) if total_zoom_true else 0.0
+
+                    render_html_metric_banner(total_zoom_acc, acc, "Combined Framing Invariance Accuracy")
+
+                    col_z1, col_z2 = st.columns(2)
+                    with col_z1:
+                        render_matrix_and_metric(
+                            zin_true, zin_pred, "Zoomed-In Profile (Close Framing)", zin_acc, acc
+                        )
+                    with col_z2:
+                        render_matrix_and_metric(
+                            zout_true, zout_pred, "Zoomed-Out Profile (Distant Framing)", zout_acc, acc
+                        )
 
 
 if __name__ == "__main__":

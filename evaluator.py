@@ -102,6 +102,7 @@ def main():
     parser.add_argument("--apply_preprocess", choices=["True", "False"], required=True)
     parser.add_argument("--flip", choices=["True", "False"], required=True)
     parser.add_argument("--rotate", choices=["0", "90", "180", "270"], required=True)
+    parser.add_argument("--zoom", type=str, default="normal", choices=["normal", "in", "out"])
     parser.add_argument("--output_json", required=True)
     args = parser.parse_args()
 
@@ -158,6 +159,32 @@ def main():
                 img = img.transpose(Image.Transpose.ROTATE_180)
             elif rotate_deg == 270:
                 img = img.transpose(Image.Transpose.ROTATE_270)
+
+            original_width, original_height = img.size
+
+            if args.zoom == "in":
+                crop_fraction = 0.80
+                left = int((1 - crop_fraction) * original_width / 2)
+                top = int((1 - crop_fraction) * original_height / 2)
+                right = int((1 + crop_fraction) * original_width / 2)
+                bottom = int((1 + crop_fraction) * original_height / 2)
+
+                img = img.crop((left, top, right, bottom))
+
+            elif args.zoom == "out":
+                scale_fraction = 0.80
+                new_w = int(original_width * scale_fraction)
+                new_h = int(original_height * scale_fraction)
+
+                resized_hand = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+                padded_img = Image.new("RGB", (original_width, original_height), (128, 128, 128))
+
+                paste_x = (original_width - new_w) // 2
+                paste_y = (original_height - new_h) // 2
+                padded_img.paste(resized_hand, (paste_x, paste_y))
+
+                img = padded_img
 
             # Preprocessing & Prediction Execution Matrix
             arr = np.array(img.resize(input_size)).astype("float32")
