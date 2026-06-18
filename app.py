@@ -523,13 +523,6 @@ def main() -> None:
                     st.session_state.deep_perp_data = None
                     st.session_state.deep_inversion_data = None
 
-                    st.session_state.waiting_for_handedness = False
-                    st.session_state.trigger_handedness_eval = False
-                    st.session_state.waiting_for_perp = False
-                    st.session_state.trigger_perp_eval = False
-                    st.session_state.waiting_for_inversion = False
-                    st.session_state.trigger_inversion_eval = False
-
                 if st.session_state.get("baseline_run_data") is None:
                     waiting_placeholder = st.empty()
                     if store["eval_lock"].locked():
@@ -613,27 +606,15 @@ def main() -> None:
             # --- STEP 1: HANDEDNESS INVARIANT VERIFICATION ---
             st.markdown("### 🖐️ Handedness Invariant Verification")
             if st.session_state.get("deep_handedness_data") is None:
-                if st.session_state.get("waiting_for_handedness"):
+                if st.button("Evaluate Handedness Robustness"):
+                    waiting_placeholder = st.empty()
                     if store["eval_lock"].locked():
-                        st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically...")
-                        time.sleep(3)
-                        st.rerun()
-                    else:
-                        st.session_state.waiting_for_handedness = False
-                        st.session_state.trigger_handedness_eval = True
-                        st.rerun()
-
-                if st.button("Evaluate Handedness Robustness") or st.session_state.get("trigger_handedness_eval"):
-                    if store["eval_lock"].locked():
-                        st.session_state.waiting_for_handedness = True
-                        st.session_state.trigger_handedness_eval = False
-                        st.rerun()
-                    
-                    st.session_state.trigger_handedness_eval = False
-                    progress_bar = st.progress(0)
-                    status_text = st.info("Running Handedness matrix configuration...")
+                        waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
                     
                     with store["eval_lock"]:
+                        waiting_placeholder.empty()
+                        progress_bar = st.progress(0)
+                        status_text = st.info("Running Handedness matrix configuration...")
                         flipped_0 = run_evaluation_process(saved_model_path, model_type, apply_preprocess, "True", "0")
                         progress_bar.progress(1.0)
                         status_text.empty()
@@ -709,29 +690,15 @@ def main() -> None:
 
             # --- STEP 2: PERPENDICULAR ORIENTATIONS OF HANDS ---
             st.write("")
-            st.markdown("### 📐 Perpendicular Orientations of Hands (90° & -90°)")
+            st.markdown("### 🫱 Horizontal Orientations of Hands (90° & -90°)")
             if st.session_state.get("deep_perp_data") is None:
-                if st.session_state.get("waiting_for_perp"):
+                if st.button("Evaluate Perpendicular Robustness"):
+                    waiting_placeholder = st.empty()
                     if store["eval_lock"].locked():
-                        st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically in 3 seconds...")
-                        time.sleep(3)
-                        st.rerun()
-                    else:
-                        st.session_state.waiting_for_perp = False
-                        st.session_state.trigger_perp_eval = True
-                        st.rerun()
-
-                if st.button("Evaluate Perpendicular Robustness") or st.session_state.get("trigger_perp_eval"):
-                    if store["eval_lock"].locked():
-                        st.session_state.waiting_for_perp = True
-                        st.session_state.trigger_perp_eval = False
-                        st.rerun()
-                        
-                    st.session_state.trigger_perp_eval = False
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
+                        waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
                     
                     with store["eval_lock"]:
+                        waiting_placeholder.empty()
                         perp_configs = [
                             ("unflipped_90", "False", "90"),
                             ("unflipped_270", "False", "270"),
@@ -739,9 +706,11 @@ def main() -> None:
                             ("flipped_270", "True", "270")
                         ]
                         slices_p = {}
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
                         
                         for idx, (s_name, f_v, r_v) in enumerate(perp_configs):
-                            status_text.info(f"Processing evaluation slice [{idx + 1}/{len(perp_configs)}]: Flip={f_v}, Rotate={r_v}°")
+                            status_text.info(f"Processing evaluation slice [{idx + 1}/{len(perp_configs)}]")
                             slices_p[s_name] = run_evaluation_process(saved_model_path, model_type, apply_preprocess, f_v, r_v)
                             progress_bar.progress((idx + 1) / len(perp_configs))
                         
@@ -785,35 +754,23 @@ def main() -> None:
             st.write("")
             st.markdown("### 🙃 Upside-down Hands")
             if st.session_state.get("deep_inversion_data") is None:
-                if st.session_state.get("waiting_for_inversion"):
+                if st.button("Evaluate Inversion Robustness"):
+                    waiting_placeholder = st.empty()
                     if store["eval_lock"].locked():
-                        st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically in 3 seconds...")
-                        time.sleep(3)
-                        st.rerun()
-                    else:
-                        st.session_state.waiting_for_inversion = False
-                        st.session_state.trigger_inversion_eval = True
-                        st.rerun()
-
-                if st.button("Evaluate Inversion Robustness") or st.session_state.get("trigger_inversion_eval"):
-                    if store["eval_lock"].locked():
-                        st.session_state.waiting_for_inversion = True
-                        st.session_state.trigger_inversion_eval = False
-                        st.rerun()
-                    
-                    st.session_state.trigger_inversion_eval = False
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
+                        waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
                     
                     with store["eval_lock"]:
+                        waiting_placeholder.empty()
                         inv_configs = [
                             ("unflipped_180", "False", "180"),
                             ("flipped_180", "True", "180")
                         ]
                         slices_i = {}
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
                         
                         for idx, (s_name, f_v, r_v) in enumerate(inv_configs):
-                            status_text.info(f"Processing evaluation slice [{idx + 1}/{len(inv_configs)}]: Flip={f_v}, Rotate={r_v}°")
+                            status_text.info(f"Processing evaluation slice [{idx + 1}/{len(inv_configs)}]")
                             slices_i[s_name] = run_evaluation_process(saved_model_path, model_type, apply_preprocess, f_v, r_v)
                             progress_bar.progress((idx + 1) / len(inv_configs))
                         
