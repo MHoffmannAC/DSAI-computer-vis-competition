@@ -400,19 +400,19 @@ def show_leaderboard() -> None:
 def render_matrix_and_metric(y_true, y_pred, label, score, baseline_score):
     diff = score - baseline_score
     if diff > 0.05:
-        color = "#155724"  # Dark green
+        color = "#155724"
         bg = "#d4edda"
     elif diff >= -0.01:
-        color = "#28a745"  # Green
+        color = "#28a745"
         bg = "#e2f0d9"
     elif diff >= -0.03:
-        color = "#ffc107"  # Yellow
+        color = "#ffc107"
         bg = "#fff3cd"
     elif diff >= -0.10:
-        color = "#fd7e14"  # Orange
+        color = "#fd7e14"
         bg = "#ffe8d6"
     else:
-        color = "#dc3545"  # Red
+        color = "#dc3545"
         bg = "#f8d7da"
 
     st.markdown(
@@ -424,7 +424,6 @@ def render_matrix_and_metric(y_true, y_pred, label, score, baseline_score):
             </p>
         </div>
         """,
-        unsafe_allow_stdio=True,
         unsafe_allow_html=True,
     )
 
@@ -460,10 +459,10 @@ def run_evaluation_process(model_path, model_type, apply_preprocess, flip_val, r
             "--rotate", rot_val,
             "--output_json", results_path
         ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        
+
         if process.returncode != 0:
             raise RuntimeError(f"Subprocess failed: {process.stderr}")
-            
+
         with open(results_path, "r") as f:
             return json.load(f)
     finally:
@@ -531,7 +530,7 @@ def main() -> None:
                                 saved_model_path = tmpf.name
 
                             st.session_state.saved_model_path = saved_model_path
-                            
+
                             baseline_run = run_evaluation_process(
                                 saved_model_path, model_type, apply_preprocess, "False", "0"
                             )
@@ -562,7 +561,7 @@ def main() -> None:
                     y_test = [pred["y_true"] for pred in baseline_run["predictions"].values()]
 
                     st.success(f"Success! Model Baseline Accuracy: {acc:.2%}")
-                    
+
                     st.subheader("🧮 Baseline Confusion Matrix")
                     fig, ax = plt.subplots(figsize=(2, 2), facecolor="black")
                     cm = confusion_matrix(y_test, y_pred)
@@ -585,7 +584,7 @@ def main() -> None:
 
                     st.divider()
                     st.subheader("🔍 Advanced Diagnostic Robustness Stress-Testing")
-                    
+
                     if st.session_state.get("deep_analysis_data") is None:
                         if st.button("Run deeper analysis matrix"):
                             waiting_placeholder = st.empty()
@@ -600,20 +599,36 @@ def main() -> None:
                             waiting_placeholder.empty()
 
                             try:
-                                with st.spinner("Processing advanced transformation matrix..."):
-                                    saved_model_path = st.session_state.saved_model_path
-                                    
-                                    slices = {
-                                        "unflipped_90": run_evaluation_process(saved_model_path, model_type, apply_preprocess, "False", "90"),
-                                        "unflipped_180": run_evaluation_process(saved_model_path, model_type, apply_preprocess, "False", "180"),
-                                        "unflipped_270": run_evaluation_process(saved_model_path, model_type, apply_preprocess, "False", "270"),
-                                        "flipped_0": run_evaluation_process(saved_model_path, model_type, apply_preprocess, "True", "0"),
-                                        "flipped_90": run_evaluation_process(saved_model_path, model_type, apply_preprocess, "True", "90"),
-                                        "flipped_180": run_evaluation_process(saved_model_path, model_type, apply_preprocess, "True", "180"),
-                                        "flipped_270": run_evaluation_process(saved_model_path, model_type, apply_preprocess, "True", "270"),
-                                    }
-                                    st.session_state.deep_analysis_data = slices
-                                    st.rerun()
+                                saved_model_path = st.session_state.saved_model_path
+
+                                progress_bar = st.progress(0)
+                                status_text = st.empty()
+
+                                slice_configs = [
+                                    ("unflipped_90", "False", "90"),
+                                    ("unflipped_180", "False", "180"),
+                                    ("unflipped_270", "False", "270"),
+                                    ("flipped_0", "True", "0"),
+                                    ("flipped_90", "True", "90"),
+                                    ("flipped_180", "True", "180"),
+                                    ("flipped_270", "True", "270")
+                                ]
+
+                                slices = {}
+                                total_slices = len(slice_configs)
+
+                                for idx, (slice_name, f_val, r_val) in enumerate(slice_configs):
+                                    status_text.info(f"Processing evaluation slice [{idx+1}/{total_slices}]: Flip={f_val}, Rotate={r_val}°")
+                                    slices[slice_name] = run_evaluation_process(
+                                        saved_model_path, model_type, apply_preprocess, f_val, r_val
+                                    )
+                                    progress_bar.progress((idx + 1) / total_slices)
+
+                                status_text.empty()
+                                progress_bar.empty()
+
+                                st.session_state.deep_analysis_data = slices
+                                st.rerun()
                             except Exception as e:
                                 st.error(f"Error compiling diagnostic analytics matrix: {e}")
                             finally:
@@ -621,11 +636,10 @@ def main() -> None:
                                 gc.collect()
                     else:
                         slices = st.session_state.deep_analysis_data
-                        
-                        # --- 1. Handedness Analysis ---
+
                         left_y_true, left_y_pred = [], []
                         right_y_true, right_y_pred = [], []
-                        
+
                         base_left_total, base_left_correct = 0, 0
                         base_right_total, base_right_correct = 0, 0
 
@@ -667,13 +681,12 @@ def main() -> None:
                             )
                             st.caption(f"Baseline portion: {base_right_correct}/{base_right_total} accurate")
 
-                        # --- 2. 90° and 270° Orientations Analysis ---
                         rot_90_270_true, rot_90_270_pred = [], []
                         for run in [slices["unflipped_90"], slices["unflipped_270"], slices["flipped_90"], slices["flipped_270"]]:
                             for p in run["predictions"].values():
                                 rot_90_270_true.append(p["y_true"])
                                 rot_90_270_pred.append(p["y_pred"])
-                        
+
                         rot_90_270_acc = np.mean(np.array(rot_90_270_true) == np.array(rot_90_270_pred)) if rot_90_270_true else 0.0
 
                         st.markdown("### Perpendicular Variations (90° & 270° Slices)")
@@ -681,13 +694,12 @@ def main() -> None:
                             rot_90_270_true, rot_90_270_pred, "Combined Vertical Alignments", rot_90_270_acc, acc
                         )
 
-                        # --- 3. 180° Inversions Analysis ---
                         rot_180_true, rot_180_pred = [], []
                         for run in [slices["unflipped_180"], slices["flipped_180"]]:
                             for p in run["predictions"].values():
                                 rot_180_true.append(p["y_true"])
                                 rot_180_pred.append(p["y_pred"])
-                        
+
                         rot_180_acc = np.mean(np.array(rot_180_true) == np.array(rot_180_pred)) if rot_180_true else 0.0
 
                         st.markdown("### Complete Inversion Variations (180° Slices)")
