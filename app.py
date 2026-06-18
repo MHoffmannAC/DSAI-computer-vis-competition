@@ -1,12 +1,13 @@
 import gc
 import hashlib
-import re
-import tempfile
-import time
-from pathlib import Path
 import json
+import re
 import subprocess
 import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
 
 import altair as alt
 import gspread
@@ -49,19 +50,12 @@ ALLOWED_MODELS = [
     "Xception",
 ]
 
-# ==== CONFIGURATION & CONSTANTS ====
 TEST_IMAGE_DIR = "test_images"
 CLASS_NAMES = ["A", "B", "C"]
 REQUIRED_COLUMNS = ["participant", "accuracy", "submission_time", "batch", "model_type"]
 
-
 help_leaderboard_toggle = """By default, the leaderboard displays one entry per participant and model type.\n\n
 Toggle if you prefer to see only one entry per participant.
-"""
-
-help_model_selection = """Please select your used model.\n\n
-Select the model family in case you used transfer learning or select "Custom" otherwise.\n\n
-The app uses this information to handle preprocessing as well as for leaderboard purposes.
 """
 
 help_preprocessing = """Select whether or not your model is performing
@@ -75,12 +69,9 @@ If you select `No`, the app will apply
 - the model family's own preprocessor for pre-trained models
 """
 
-# ==== GLOBAL STORE & STATE ====
-
 
 @st.cache_resource
 def get_global_store() -> dict:
-    """Initializes the global in-memory store for the application session."""
     return {
         "submissions": {},
         "alltime_submissions": None,
@@ -90,13 +81,11 @@ def get_global_store() -> dict:
         "batches_last_updated": None,
         "gsheet_conn": None,
         "configured_batches": set(),
-        "is_evaluating": False,
-        "eval_start_time": None,
+        "eval_lock": threading.Lock(),
     }
 
 
 def state_inits() -> None:
-    """Initializes session state variables and the initial GSheet connection."""
     if "user_name" not in st.session_state:
         st.session_state.user_name = None
     if "code_input" not in st.session_state:
@@ -116,7 +105,6 @@ def state_inits() -> None:
 
 
 def load_alltime_data(store: dict) -> None:
-    """Aggregates data from all batches (EXCEPT anonymous) for the global leaderboard."""
     try:
         batches_df = store["gsheet_conn"].read(worksheet="Batches", ttl=0)
         batches = batches_df["Batch"].tolist()
@@ -139,18 +127,13 @@ def load_alltime_data(store: dict) -> None:
         store["alltime_submissions"] = pd.DataFrame()
 
 
-# ==== CACHED HELPER FUNCTIONS ====
-
-
 @st.cache_resource
 def get_gsheet_connection() -> GSheetsConnection:
-    """Returns the Streamlit GSheets connection object."""
     return st.connection("gsheets", type=GSheetsConnection)
 
 
 @st.cache_resource
 def configure_gsheet(_store: dict, batch: str | None = None) -> str:
-    """Configures the GSheet connection and ensures specific worksheets exist."""
     try:
         if _store["gsheet_conn"] is None:
             _store["gsheet_conn"] = get_gsheet_connection()
@@ -165,7 +148,6 @@ def configure_gsheet(_store: dict, batch: str | None = None) -> str:
 
 
 def display_admin() -> None:
-    """Provides UI for instructors to clear the global cache."""
     st.divider()
     st.subheader("🛠️ Admin Settings", anchor=False)
     if st.button("Clear cached resources"):
@@ -176,11 +158,7 @@ def display_admin() -> None:
         st.rerun()
 
 
-# ==== GSHEETS UTILS ====
-
-
 def _open_spreadsheet() -> gspread.Spreadsheet:
-    """Opens the raw gspread client for structural changes."""
     creds_dict = dict(st.secrets["connections"]["gsheets"])
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -192,7 +170,6 @@ def _open_spreadsheet() -> gspread.Spreadsheet:
 
 
 def ensure_batch_sheet_exists(batch: str, conn: GSheetsConnection) -> None:
-    """Checks if a worksheet exists for the batch; creates it if not."""
     try:
         conn.read(worksheet=batch, ttl=0)
     except WorksheetNotFound:
@@ -204,15 +181,11 @@ def ensure_batch_sheet_exists(batch: str, conn: GSheetsConnection) -> None:
         st.error(f"Failed to verify/create worksheet: {e}")
 
 
-# ==== LEADERBOARD LOGIC ====
-
-
 def generate_leaderboard_dataframe(
     submissions_df: pd.DataFrame,
     *,
     reduce_leaderboard: bool,
 ) -> pd.DataFrame:
-    """Processes submission data into a leaderboard format."""
     if submissions_df.empty:
         return pd.DataFrame()
 
@@ -234,7 +207,6 @@ def generate_leaderboard_dataframe(
 
 
 def build_leaderboards() -> None:
-    """Rebuilds the processed leaderboards in the store."""
     store = get_global_store()
     for batch, df in store["submissions"].items():
         if batch != "anonymous" and df is not None and not df.empty:
@@ -256,7 +228,6 @@ def build_leaderboards() -> None:
 
 
 def update_submissions(participant_results: pd.DataFrame) -> None:
-    """Writes a new result to GSheets and updates memory."""
     store = get_global_store()
     batch = st.session_state.batch
 
@@ -281,18 +252,13 @@ def update_submissions(participant_results: pd.DataFrame) -> None:
         st.error(f"Could not update Google Sheets: {e}")
 
 
-# ==== UI COMPONENTS ====
-
-
 def get_participant_info() -> None:
-    """Handles Login and Batch authentication."""
     store = get_global_store()
 
     if st.session_state.user_name and st.session_state.batch:
-        # Check if we need to load the submissions for chart plotting/recording
         if st.session_state.batch not in store["submissions"]:
             try:
-                configure_gsheet(_store=store, batch = st.session_state.batch)
+                configure_gsheet(_store=store, batch=st.session_state.batch)
                 store["submissions"][st.session_state.batch] = store[
                     "gsheet_conn"
                 ].read(worksheet=st.session_state.batch, ttl=0)
@@ -304,7 +270,6 @@ def get_participant_info() -> None:
         st.info(
             f"Logged in as: **{st.session_state.user_name}** from **{st.session_state.batch}**",
         )
-
     else:
         st.write("Please log in with the details provided by your instructor.")
         st.divider()
@@ -341,7 +306,6 @@ def get_participant_info() -> None:
 
 
 def plot_submissions(participant_name: str) -> None:
-    """Plot submission accuracy for a participant over time."""
     store = get_global_store()
     batch = st.session_state.batch
     if batch not in store["submissions"]:
@@ -361,9 +325,7 @@ def plot_submissions(participant_name: str) -> None:
             participant_submissions["submission_time"],
             format="ISO8601",
         )
-        participant_submissions = participant_submissions.sort_values(
-            "submission_time",
-        )  # .set_index("submission_time")
+        participant_submissions = participant_submissions.sort_values("submission_time")
         line = (
             alt.Chart(participant_submissions)
             .mark_line()
@@ -373,10 +335,9 @@ def plot_submissions(participant_name: str) -> None:
             )
         )
 
-        # Large colored points on top of the line
         points = (
             alt.Chart(participant_submissions)
-            .mark_point(filled=True, size=150)  # size controls how big the dots are
+            .mark_point(filled=True, size=150)
             .encode(
                 x="submission_time:T",
                 y="accuracy:Q",
@@ -385,23 +346,16 @@ def plot_submissions(participant_name: str) -> None:
             )
         )
 
-        # Layer line + points
         chart = alt.layer(line, points).interactive()
-
         st.altair_chart(chart, width="stretch")
     elif len(participant_submissions):
-        st.success(
-            "First submission recorded! Submit more models to see your progress chart.",
-        )
+        st.success("First submission recorded! Submit more models to see your progress chart.")
 
 
 @st.fragment(run_every=10)
 def show_leaderboard() -> None:
-    """Displays the interactive leaderboard with toggle logic."""
     if st.session_state.batch == "anonymous":
-        st.info(
-            "You are currently in an anonymous session. You won't see or appear on any public leaderboards.",
-        )
+        st.info("You are currently in an anonymous session. You won't see or appear on any public leaderboards.")
         return
 
     store = get_global_store()
@@ -421,10 +375,7 @@ def show_leaderboard() -> None:
             submissions_df,
             reduce_leaderboard=reduce_leaderboard,
         )
-        st.dataframe(
-            view.drop("batch", axis=1, errors="ignore"),
-            width="stretch",
-        )
+        st.dataframe(view.drop("batch", axis=1, errors="ignore"), width="stretch")
     else:
         st.write("No submissions yet for this batch.")
 
@@ -446,7 +397,77 @@ def show_leaderboard() -> None:
         st.dataframe(at_view, width="stretch")
 
 
-# ==== MAIN ====
+def render_matrix_and_metric(y_true, y_pred, label, score, baseline_score):
+    diff = score - baseline_score
+    if diff > 0.05:
+        color = "#155724"  # Dark green
+        bg = "#d4edda"
+    elif diff >= -0.01:
+        color = "#28a745"  # Green
+        bg = "#e2f0d9"
+    elif diff >= -0.03:
+        color = "#ffc107"  # Yellow
+        bg = "#fff3cd"
+    elif diff >= -0.10:
+        color = "#fd7e14"  # Orange
+        bg = "#ffe8d6"
+    else:
+        color = "#dc3545"  # Red
+        bg = "#f8d7da"
+
+    st.markdown(
+        f"""
+        <div style="background-color:{bg}; padding:10px; border-radius:5px; border-left:5px solid {color}; margin-bottom:10px;">
+            <h4 style="margin:0; color:#333;">{label}</h4>
+            <p style="margin:5px 0 0 0; font-size:18px; font-weight:bold; color:{color};">
+                Accuracy: {score:.2%} ({diff:+.2%} vs Baseline)
+            </p>
+        </div>
+        """,
+        unsafe_allow_stdio=True,
+        unsafe_allow_html=True,
+    )
+
+    fig, ax = plt.subplots(figsize=(2, 2), facecolor="black")
+    cm = confusion_matrix(y_true, y_pred)
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="copper",
+        xticklabels=CLASS_NAMES,
+        yticklabels=CLASS_NAMES,
+        ax=ax,
+        cbar=False,
+        annot_kws={"color": "white", "fontsize": 8},
+    )
+    ax.set_xlabel("Predicted", color="white", fontsize=8)
+    ax.set_ylabel("True Label", color="white", fontsize=8)
+    ax.tick_params(colors="white", labelsize=8, which="both", length=0)
+    st.pyplot(fig, width="content")
+    plt.close(fig)
+
+
+def run_evaluation_process(model_path, model_type, apply_preprocess, flip_val, rot_val):
+    results_path = tempfile.NamedTemporaryFile(suffix=".json", delete=False).name
+    try:
+        process = subprocess.run([
+            sys.executable, "evaluator.py",
+            "--model_path", model_path,
+            "--model_type", model_type,
+            "--apply_preprocess", str(apply_preprocess),
+            "--flip", flip_val,
+            "--rotate", rot_val,
+            "--output_json", results_path
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        
+        if process.returncode != 0:
+            raise RuntimeError(f"Subprocess failed: {process.stderr}")
+            
+        with open(results_path, "r") as f:
+            return json.load(f)
+    finally:
+        Path(results_path).unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -461,18 +482,17 @@ def main() -> None:
     state_inits()
     get_participant_info()
 
+    store = get_global_store()
+
     if st.session_state.user_name and st.session_state.batch:
         st.subheader("📤 Submit Your Model", anchor=False)
-        cols = st.columns(
-                2,
-                gap="large",
-            )
+        cols = st.columns(2, gap="large")
         with cols[0]:
             model_type = st.selectbox(
                 "Select the exact model used:",
-                options=ALLOWED_MODELS, # Now shows specific models
+                options=ALLOWED_MODELS,
                 index=None,
-                help="Note: Large models (ConvNeXt, EfficientNetL, etc.) are disabled for stability."
+                help="Note: Large models are disabled for stability."
             )
         with cols[1]:
             apply_preprocess = st.radio(
@@ -481,6 +501,7 @@ def main() -> None:
                 index=0,
                 help=help_preprocessing,
             ) == "No"
+
         if model_type:
             uploaded_file = st.file_uploader("Select a Keras model file", type=["keras"])
 
@@ -488,216 +509,191 @@ def main() -> None:
                 file_hash = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
                 if st.session_state.get("last_processed_hash") != file_hash:
                     st.session_state.last_processed_hash = file_hash
+                    st.session_state.baseline_run_data = None
+                    st.session_state.deep_analysis_data = None
 
-                    store = get_global_store()
-                    now = time.time()
-                    TIMEOUT_SECONDS = 300
+                if st.session_state.get("baseline_run_data") is None:
                     waiting_placeholder = st.empty()
-                    while store["is_evaluating"]:
-                        start_time = store.get("eval_start_time")
-                        if start_time and (now - start_time) > TIMEOUT_SECONDS:
-                            waiting_placeholder.info("⚠️ Previous evaluation timed out or crashed. Recovering...")
-                            break
-                        waiting_placeholder.warning(
-                            "⏳ Another user is currently evaluating a model. "
-                            "Please wait, your evaluation will start automatically when the server is free..."
-                        )
-                        time.sleep(5)
-                        now = time.time()
-                    store["is_evaluating"] = True
-                    store["eval_start_time"] = time.time()
+                    lock_acquired = False
+                    while not lock_acquired:
+                        lock_acquired = store["eval_lock"].acquire(blocking=False)
+                        if not lock_acquired:
+                            waiting_placeholder.warning(
+                                "⏳ Another user is currently evaluating a model. Please wait..."
+                            )
+                            time.sleep(3)
                     waiting_placeholder.empty()
+
                     try:
-                        with st.spinner("Analyzing model performance..."):  # noqa: SIM117
+                        with st.spinner("Analyzing baseline model performance..."):
                             with tempfile.NamedTemporaryFile(suffix=".keras", delete=False) as tmpf:
                                 tmpf.write(uploaded_file.getbuffer())
-                                model_path = tmpf.name
+                                saved_model_path = tmpf.name
 
-                            uploaded_file = None
-                            gc.collect()
+                            st.session_state.saved_model_path = saved_model_path
+                            
+                            baseline_run = run_evaluation_process(
+                                saved_model_path, model_type, apply_preprocess, "False", "0"
+                            )
+                            st.session_state.baseline_run_data = baseline_run
+
+                            acc = baseline_run["overall_accuracy"]
+                            result = pd.DataFrame([
+                                {
+                                    "accuracy": round(acc, 4),
+                                    "participant": st.session_state.user_name,
+                                    "batch": st.session_state.batch,
+                                    "submission_time": pd.Timestamp.now().isoformat(),
+                                    "model_type": model_type,
+                                },
+                            ])
+                            update_submissions(result)
+                    except Exception as e:
+                        st.error(f"Error evaluating model baseline: {e}")
+                    finally:
+                        store["eval_lock"].release()
+                        uploaded_file = None
+                        gc.collect()
+
+                if st.session_state.get("baseline_run_data") is not None:
+                    baseline_run = st.session_state.baseline_run_data
+                    acc = baseline_run["overall_accuracy"]
+                    y_pred = [pred["y_pred"] for pred in baseline_run["predictions"].values()]
+                    y_test = [pred["y_true"] for pred in baseline_run["predictions"].values()]
+
+                    st.success(f"Success! Model Baseline Accuracy: {acc:.2%}")
+                    
+                    st.subheader("🧮 Baseline Confusion Matrix")
+                    fig, ax = plt.subplots(figsize=(2, 2), facecolor="black")
+                    cm = confusion_matrix(y_test, y_pred)
+                    sns.heatmap(
+                        cm,
+                        annot=True,
+                        fmt="d",
+                        cmap="copper",
+                        xticklabels=CLASS_NAMES,
+                        yticklabels=CLASS_NAMES,
+                        ax=ax,
+                        cbar=False,
+                        annot_kws={"color": "white", "fontsize": 8},
+                    )
+                    ax.set_xlabel("Predicted", color="white", fontsize=8)
+                    ax.set_ylabel("True Label", color="white", fontsize=8)
+                    ax.tick_params(colors="white", labelsize=8, which="both", length=0)
+                    st.pyplot(fig, width="content")
+                    plt.close(fig)
+
+                    st.divider()
+                    st.subheader("🔍 Advanced Diagnostic Robustness Stress-Testing")
+                    
+                    if st.session_state.get("deep_analysis_data") is None:
+                        if st.button("Run deeper analysis matrix"):
+                            waiting_placeholder = st.empty()
+                            lock_acquired = False
+                            while not lock_acquired:
+                                lock_acquired = store["eval_lock"].acquire(blocking=False)
+                                if not lock_acquired:
+                                    waiting_placeholder.warning(
+                                        "⏳ Server busy. Waiting to initiate matrix evaluation..."
+                                    )
+                                    time.sleep(3)
+                            waiting_placeholder.empty()
 
                             try:
-                                # Define matrix loops
-                                flip_options = ["False", "True"]
-                                rotate_options = ["0", "90", "180", "270"]
-                                total_runs = len(flip_options) * len(rotate_options)
-                                run_idx = 0
-
-                                progress_bar = st.progress(0)
-                                status_text = st.empty()
-
-                                raw_matrix_results = []
-
-                                # Execute distinct isolated subprocesses to keep memory usage low
-                                for flip_val in flip_options:
-                                    for rot_val in rotate_options:
-                                        run_idx += 1
-                                        status_text.info(
-                                            f"Running Combo [{run_idx}/{total_runs}]: "
-                                            f"Flip={flip_val} | Rotate={rot_val}°"
-                                        )
-
-                                        results_path = tempfile.NamedTemporaryFile(suffix=".json", delete=False).name
-
-                                        process = subprocess.run([
-                                            sys.executable, "evaluator.py",
-                                            "--model_path", model_path,
-                                            "--model_type", model_type,
-                                            "--apply_preprocess", str(apply_preprocess),
-                                            "--flip", flip_val,
-                                            "--rotate", rot_val,
-                                            "--output_json", results_path
-                                        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
-                                        if process.returncode != 0:
-                                            st.error(f"Error on Combo Flip={flip_val}, Rotate={rot_val}°: {process.stderr}")
-                                            raise RuntimeError("Subprocess worker evaluation failure")
-
-                                        with open(results_path, "r") as f:
-                                            combo_data = json.load(f)
-                                            raw_matrix_results.append(combo_data)
-
-                                        Path(results_path).unlink(missing_ok=True)
-                                        progress_bar.progress(run_idx / total_runs)
-
-                                progress_bar.progress(1.0)
-                                status_text.success("All transformation runs complete!")
-
-                                # --- POST-PROCESSING COMPILED METRICS ---
-                                # Isolate pure baseline configuration (Flip=False, Rotate=0)
-                                baseline_run = next(
-                                    r for r in raw_matrix_results 
-                                    if r["flip"] is False and r["rotate"] == 0
-                                )
-
-                                acc = baseline_run["overall_accuracy"]
-                                y_pred = [pred["y_pred"] for pred in baseline_run["predictions"].values()]
-                                y_test = [pred["y_true"] for pred in baseline_run["predictions"].values()]
-
-                                # 1. Update Leaderboard Entry
-                                result = pd.DataFrame([
-                                    {
-                                        "accuracy": round(acc, 4),
-                                        "participant": st.session_state.user_name,
-                                        "batch": st.session_state.batch,
-                                        "submission_time": pd.Timestamp.now().isoformat(),
-                                        "model_type": model_type,
-                                    },
-                                ])
-                                update_submissions(result)
-                                st.success(f"Success! Model Baseline Accuracy: {acc:.2%}")
-
-                                # 2. Generate Confusion Matrix Visualization
-                                st.subheader("🧮 Baseline Confusion Matrix")
-                                fig, ax = plt.subplots(figsize=(2, 2), facecolor="black")
-                                cm = confusion_matrix(y_test, y_pred)
-                                sns.heatmap(
-                                    cm,
-                                    annot=True,
-                                    fmt="d",
-                                    cmap="copper",
-                                    xticklabels=CLASS_NAMES,
-                                    yticklabels=CLASS_NAMES,
-                                    ax=ax,
-                                    cbar=False,
-                                    annot_kws={"color": "white", "fontsize": 8},
-                                )
-                                ax.set_xlabel("Predicted", color="white")
-                                ax.set_ylabel("True Label", color="white")
-                                ax.tick_params(colors="white", labelsize=8)
-                                ax.tick_params(which="both", length=0)
-                                st.pyplot(fig, width="content")
-                                plt.close(fig)
-
-                                # 3. Advanced Diagnostic Stress-Testing Chart Summary
-                                with st.expander("🔍 Robustness Analysis & Stress-Testing"):
-                                    st.markdown(
-                                        "This overview breaks down how your model reacts to changes in orientation "
-                                        "and hand configurations compared to the clean **Baseline** dataset."
-                                    )
-
-                                    summary_stats = []
-
-                                    # A. Orientation Drop Values (Calculated across pure unflipped imagery batches)
-                                    for r in raw_matrix_results:
-                                        if r["flip"] is False:
-                                            lbl = f"Rotate {r['rotate']}°" if r['rotate'] > 0 else "Baseline (Clean Images)"
-                                            summary_stats.append({"Dataset Slice": lbl, "Accuracy (%)": r["overall_accuracy"] * 100})
-
-                                    # B. Cross-Referencing Embedded File-Level Native Handedness Metadata
-                                    unrotated_unflipped = next(r for r in raw_matrix_results if r["flip"] is False and r["rotate"] == 0)
-                                    unrotated_flipped = next(r for r in raw_matrix_results if r["flip"] is True and r["rotate"] == 0)
-
-                                    hand_metrics = {
-                                        "Left-Handed (Native Original)": {"correct": 0, "total": 0},
-                                        "Left-Handed (Simulated via Flip)": {"correct": 0, "total": 0},
-                                        "Right-Handed (Native Original)": {"correct": 0, "total": 0},
-                                        "Right-Handed (Simulated via Flip)": {"correct": 0, "total": 0},
+                                with st.spinner("Processing advanced transformation matrix..."):
+                                    saved_model_path = st.session_state.saved_model_path
+                                    
+                                    slices = {
+                                        "unflipped_90": run_evaluation_process(saved_model_path, model_type, apply_preprocess, "False", "90"),
+                                        "unflipped_180": run_evaluation_process(saved_model_path, model_type, apply_preprocess, "False", "180"),
+                                        "unflipped_270": run_evaluation_process(saved_model_path, model_type, apply_preprocess, "False", "270"),
+                                        "flipped_0": run_evaluation_process(saved_model_path, model_type, apply_preprocess, "True", "0"),
+                                        "flipped_90": run_evaluation_process(saved_model_path, model_type, apply_preprocess, "True", "90"),
+                                        "flipped_180": run_evaluation_process(saved_model_path, model_type, apply_preprocess, "True", "180"),
+                                        "flipped_270": run_evaluation_process(saved_model_path, model_type, apply_preprocess, "True", "270"),
                                     }
-
-                                    # Compile Native Images
-                                    for fname, p in unrotated_unflipped["predictions"].items():
-                                        hand = p["native_handedness"]
-                                        if hand in ["Left", "Right"]:
-                                            key = f"{hand}-Handed (Native Original)"
-                                            hand_metrics[key]["total"] += 1
-                                            if p["correct"]: hand_metrics[key]["correct"] += 1
-
-                                    # Compile Flipped Images
-                                    for fname, p in unrotated_flipped["predictions"].items():
-                                        hand = p["native_handedness"]
-                                        if hand == "Left":
-                                            key = "Right-Handed (Simulated via Flip)"
-                                            hand_metrics[key]["total"] += 1
-                                            if p["correct"]: hand_metrics[key]["correct"] += 1
-                                        elif hand == "Right":
-                                            key = "Left-Handed (Simulated via Flip)"
-                                            hand_metrics[key]["total"] += 1
-                                            if p["correct"]: hand_metrics[key]["correct"] += 1
-
-                                    for lbl, counts in hand_metrics.items():
-                                        if counts["total"] > 0:
-                                            summary_stats.append({
-                                                "Dataset Slice": lbl,
-                                                "Accuracy (%)": (counts["correct"] / counts["total"]) * 100
-                                            })
-
-                                    # C. Max Combined Stressor Index (Flipped + 180 Rotation)
-                                    worst_case = next((r for r in raw_matrix_results if r["flip"] is True and r["rotate"] == 180), None)
-                                    if worst_case:
-                                        summary_stats.append({
-                                            "Dataset Slice": "Combined Stress: Flipped + 180°",
-                                            "Accuracy (%)": worst_case["overall_accuracy"] * 100
-                                        })
-
-                                    # Render Bar Graph Analytics Component
-                                    df_chart = pd.DataFrame(summary_stats)
-                                    bars = alt.Chart(df_chart).mark_bar().encode(
-                                        x=alt.X('Accuracy (%):Q', scale=alt.Scale(domain=[0, 100])),
-                                        y=alt.Y('Dataset Slice:N', sort='-x'),
-                                        color=alt.condition(
-                                            alt.datum['Dataset Slice'] == 'Baseline (Clean Images)',
-                                            alt.value('#1f77b4'),  
-                                            alt.value('#ff7f0e')   
-                                        )
-                                    )
-                                    st.altair_chart(bars, use_container_width=True)
-
-                                gc.collect()
-                                Path(model_path).unlink(missing_ok=True)
+                                    st.session_state.deep_analysis_data = slices
+                                    st.rerun()
                             except Exception as e:
-                                st.error(f"Error evaluating model matrix iterations: {e}")
+                                st.error(f"Error compiling diagnostic analytics matrix: {e}")
+                            finally:
+                                store["eval_lock"].release()
                                 gc.collect()
-                    except:
-                        pass
-                    finally:
-                        store["is_evaluating"] = False
-                        store["eval_start_time"] = None
-                        gc.collect()
-                        if 'model_path' in locals():
-                            Path(model_path).unlink(missing_ok=True)
-                        if 'results_path' in locals():
-                            Path(results_path).unlink(missing_ok=True)
+                    else:
+                        slices = st.session_state.deep_analysis_data
+                        
+                        # --- 1. Handedness Analysis ---
+                        left_y_true, left_y_pred = [], []
+                        right_y_true, right_y_pred = [], []
+                        
+                        base_left_total, base_left_correct = 0, 0
+                        base_right_total, base_right_correct = 0, 0
+
+                        for fname, p in baseline_run["predictions"].items():
+                            hand = p["native_handedness"]
+                            if hand == "Left":
+                                left_y_true.append(p["y_true"])
+                                left_y_pred.append(p["y_pred"])
+                                base_left_total += 1
+                                if p["correct"]: base_left_correct += 1
+                            elif hand == "Right":
+                                right_y_true.append(p["y_true"])
+                                right_y_pred.append(p["y_pred"])
+                                base_right_total += 1
+                                if p["correct"]: base_right_correct += 1
+
+                        for fname, p in slices["flipped_0"]["predictions"].items():
+                            hand = p["native_handedness"]
+                            if hand == "Left":
+                                right_y_true.append(p["y_true"])
+                                right_y_pred.append(p["y_pred"])
+                            elif hand == "Right":
+                                left_y_true.append(p["y_true"])
+                                left_y_pred.append(p["y_pred"])
+
+                        left_acc = np.mean(np.array(left_y_true) == np.array(left_y_pred)) if left_y_true else 0.0
+                        right_acc = np.mean(np.array(right_y_true) == np.array(right_y_pred)) if right_y_true else 0.0
+
+                        st.markdown("### Handedness Slice Profile")
+                        col_h1, col_h2 = st.columns(2)
+                        with col_h1:
+                            render_matrix_and_metric(
+                                left_y_true, left_y_pred, "Left-Handed Profile (Visually Left)", left_acc, acc
+                            )
+                            st.caption(f"Baseline portion: {base_left_correct}/{base_left_total} accurate")
+                        with col_h2:
+                            render_matrix_and_metric(
+                                right_y_true, right_y_pred, "Right-Handed Profile (Visually Right)", right_acc, acc
+                            )
+                            st.caption(f"Baseline portion: {base_right_correct}/{base_right_total} accurate")
+
+                        # --- 2. 90° and 270° Orientations Analysis ---
+                        rot_90_270_true, rot_90_270_pred = [], []
+                        for run in [slices["unflipped_90"], slices["unflipped_270"], slices["flipped_90"], slices["flipped_270"]]:
+                            for p in run["predictions"].values():
+                                rot_90_270_true.append(p["y_true"])
+                                rot_90_270_pred.append(p["y_pred"])
+                        
+                        rot_90_270_acc = np.mean(np.array(rot_90_270_true) == np.array(rot_90_270_pred)) if rot_90_270_true else 0.0
+
+                        st.markdown("### Perpendicular Variations (90° & 270° Slices)")
+                        render_matrix_and_metric(
+                            rot_90_270_true, rot_90_270_pred, "Combined Vertical Alignments", rot_90_270_acc, acc
+                        )
+
+                        # --- 3. 180° Inversions Analysis ---
+                        rot_180_true, rot_180_pred = [], []
+                        for run in [slices["unflipped_180"], slices["flipped_180"]]:
+                            for p in run["predictions"].values():
+                                rot_180_true.append(p["y_true"])
+                                rot_180_pred.append(p["y_pred"])
+                        
+                        rot_180_acc = np.mean(np.array(rot_180_true) == np.array(rot_180_pred)) if rot_180_true else 0.0
+
+                        st.markdown("### Complete Inversion Variations (180° Slices)")
+                        render_matrix_and_metric(
+                            rot_180_true, rot_180_pred, "Combined Upside-Down Alignment", rot_180_acc, acc
+                        )
 
         plot_submissions(st.session_state.user_name)
         show_leaderboard()
