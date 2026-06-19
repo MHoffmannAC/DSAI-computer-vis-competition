@@ -32,23 +32,36 @@ class CloudLogFormatter(logging.Formatter):
     RESET = "\033[0m"
     DARK_ORANGE = "\033[38;5;208m"
     GREEN = "\033[32m"
+    MAX_USER_LENGTH = 10
+    MAX_COMP_LENGTH = 10
 
     def format(self, record):
-        # 1. Capture and format the system user block (Fixed 15 chars, centered, truncated)
+
+        level_map = {
+            "DEBUG": "DEBUG",
+            "INFO": "INFO",
+            "WARNING": "WARN",
+            "ERROR": "ERROR",
+            "CRITICAL": "FATAL",
+        }
         raw_user = str(getattr(record, "user", "SYSTEM"))
-        user_formatted = raw_user[:15] if len(raw_user) > 15 else raw_user.center(15)
+        user_formatted = (
+            raw_user[:self.MAX_USER_LENGTH]
+            if len(raw_user) > self.MAX_USER_LENGTH
+            else raw_user.ljust(self.MAX_USER_LENGTH)
+        )
 
-        # 2. Capture and format the application target component block (Fixed 10 chars, truncated)
         raw_comp = str(getattr(record, "comp", "CORE"))
-        comp_formatted = raw_comp[:10] if len(raw_comp) > 10 else raw_comp.center(10)
+        comp_formatted = (
+            raw_comp[:self.MAX_COMP_LENGTH]
+            if len(raw_comp) > self.MAX_COMP_LENGTH
+            else raw_comp.ljust(self.MAX_COMP_LENGTH)
+        )
 
-        # 3. Pull context timestamps and clean alignment tags
         asctime = self.formatTime(record, self.datefmt)
-        levelname = f"{record.levelname:<5}"
+        levelname = f"{level_map.get(record.levelname, record.levelname):<5}"
         msg = record.getMessage()
 
-        # 4. Color router baseline check logic
-        # Apply Dark Orange for waitlisted delays, Green for final successes, normal for starts
         if "waitlisted" in msg.lower() or "held" in msg.lower():
             color_prefix = self.DARK_ORANGE
         elif "completed" in msg.lower() or "success" in msg.lower() or "complete" in msg.lower():
@@ -58,8 +71,8 @@ class CloudLogFormatter(logging.Formatter):
 
         # Assemble the final log stream grid string
         if color_prefix:
-            return f"{asctime} [{levelname}] [{user_formatted}] [{comp_formatted}] {color_prefix}{msg}{self.RESET}"
-        return f"{asctime} [{levelname}] [{user_formatted}] [{comp_formatted}] {msg}"
+            return f"{asctime} {levelname} {user_formatted} {comp_formatted} {color_prefix}{msg}{self.RESET}"
+        return f"{asctime} {levelname} {user_formatted} {comp_formatted} {msg}"
 
 # Instantiate stream handlers bound directly to sys.stdout
 log_handler = logging.StreamHandler(sys.stdout)
