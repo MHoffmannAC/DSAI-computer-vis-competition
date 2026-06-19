@@ -23,17 +23,57 @@ from PIL import Image
 from sklearn.metrics import confusion_matrix
 from streamlit_gsheets import GSheetsConnection
 
-# ==== STREAMLIT CLOUD LIVE LOGGING CONFIGURATION ====
-logging.basicConfig(
-    stream=sys.stdout,
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-logger = logging.getLogger(__name__)
+# ==============================================================================
+# ==== STREAMLIT CLOUD LIVE ANSI-COLOR GRID LOGGING CONFIGURATION ====
+# ==============================================================================
+
+class CloudLogFormatter(logging.Formatter):
+    # ANSI Terminal Palette Codes
+    RESET = "\033[0m"
+    DARK_ORANGE = "\033[38;5;208m"
+    GREEN = "\033[32m"
+
+    def format(self, record):
+        # 1. Capture and format the system user block (Fixed 15 chars, centered, truncated)
+        raw_user = str(getattr(record, "user", "SYSTEM"))
+        user_formatted = raw_user[:15] if len(raw_user) > 15 else raw_user.center(15)
+
+        # 2. Capture and format the application target component block (Fixed 10 chars, truncated)
+        raw_comp = str(getattr(record, "comp", "CORE"))
+        comp_formatted = raw_comp[:10] if len(raw_comp) > 10 else raw_comp.center(10)
+
+        # 3. Pull context timestamps and clean alignment tags
+        asctime = self.formatTime(record, self.datefmt)
+        levelname = f"{record.levelname:<5}"
+        msg = record.getMessage()
+
+        # 4. Color router baseline check logic
+        # Apply Dark Orange for waitlisted delays, Green for final successes, normal for starts
+        if "waitlisted" in msg.lower() or "held" in msg.lower():
+            color_prefix = self.DARK_ORANGE
+        elif "completed" in msg.lower() or "success" in msg.lower() or "complete" in msg.lower():
+            color_prefix = self.GREEN
+        else:
+            color_prefix = ""
+
+        # Assemble the final log stream grid string
+        if color_prefix:
+            return f"{asctime} [{levelname}] [{user_formatted}] [{comp_formatted}] {color_prefix}{msg}{self.RESET}"
+        return f"{asctime} [{levelname}] [{user_formatted}] [{comp_formatted}] {msg}"
+
+# Instantiate stream handlers bound directly to sys.stdout
+log_handler = logging.StreamHandler(sys.stdout)
+log_handler.setFormatter(CloudLogFormatter(datefmt="%Y-%m-%d %H:%M:%S"))
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+# Clear out pre-existing default stream wrappers to prevent duplicated lines
+logger.handlers = [log_handler]
 
 # Force stdout to be completely unbuffered on Streamlit Cloud containers
 sys.stdout.reconfigure(line_buffering=True)
+
+# ==============================================================================
 
 ALLOWED_MODELS = [
     "Custom",
@@ -300,7 +340,7 @@ def get_participant_info() -> None:
                 st.error("Database connection failed.")
                 st.stop()
 
-        user_name = st.text_input("Username (Real Name or Alias):") + "_augtest"
+        user_name = st.text_input("Username (Real Name or Alias):")
         code_input = st.text_input("Secret Batch Code:", type="password")
 
         if user_name and code_input:
@@ -541,13 +581,19 @@ def main() -> None:
                 if st.session_state.get("baseline_run_data") is None:
                     waiting_placeholder = st.empty()
                     if store["eval_lock"].locked():
-                        logger.warning(f"User '{st.session_state.user_name}' is waitlisted. Baseline evaluation lock held.")
+                        logger.warning(
+                            f"User is waitlisted. Baseline evaluation lock held.",
+                            extra={"user": st.session_state.user_name, "comp": "BASELINE"}
+                        )
                         waiting_placeholder.warning("⏳ Another user is currently evaluating a model. Please wait, your evaluation will start automatically when the server is free...")
 
                     with store["eval_lock"]:
                         waiting_placeholder.empty()
                         try:
-                            logger.info(f"User '{st.session_state.user_name}' started baseline model evaluation for type: {model_type}")
+                            logger.info(
+                                f"Model evaluation started for type: {model_type}",
+                                extra={"user": st.session_state.user_name, "comp": "BASELINE"}
+                            )
                             with st.spinner("Analyzing model performance..."):
                                 with tempfile.NamedTemporaryFile(suffix=".keras", delete=False) as tmpf:
                                     tmpf.write(uploaded_file.getbuffer())
@@ -571,9 +617,15 @@ def main() -> None:
                                     },
                                 ])
                                 update_submissions(result)
-                                logger.info(f"User '{st.session_state.user_name}' baseline computation completed successfully. Accuracy: {acc:.4f}")
+                                logger.info(
+                                    f"Baseline computation completed successfully. Accuracy: {acc:.4f}",
+                                    extra={"user": st.session_state.user_name, "comp": "BASELINE"}
+                                )
                         except Exception as e:
-                            logger.error(f"Baseline matrix evaluation failed for '{st.session_state.user_name}': {str(e)}")
+                            logger.error(
+                                f"Baseline matrix evaluation failed: {str(e)}",
+                                extra={"user": st.session_state.user_name, "comp": "BASELINE"}
+                            )
                             st.error(f"Error evaluating model baseline: {e}")
                         finally:
                             uploaded_file = None
@@ -620,7 +672,9 @@ def main() -> None:
 
             if show_diagnostics:
                 st.header("🔍 Advanced Diagnostic: Robustness Stress-Testing", anchor=False)
-                st.write("Analyze your network's vulnerabilities against variance in hand profiles, perpendicular orientations, and total canvas inversions.")
+                st.write("Analyze your network's vulnerabilities against variance in "
+                         "handedness, horizontal hand orientations, "
+                         "total canvas inversions, and scaling.")
 
                 saved_model_path = st.session_state.saved_model_path
                 baseline_run = st.session_state.baseline_run_data
@@ -632,12 +686,18 @@ def main() -> None:
                     if st.button("Evaluate Handedness Robustness"):
                         waiting_placeholder = st.empty()
                         if store["eval_lock"].locked():
-                            logger.warning(f"User '{st.session_state.user_name}' is waitlisted. Handedness evaluation lock held.")
+                            logger.warning(
+                                f"User is waitlisted. Handedness evaluation lock held.",
+                                extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"}
+                            )
                             waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
-                        
+
                         with store["eval_lock"]:
                             waiting_placeholder.empty()
-                            logger.info(f"User '{st.session_state.user_name}' initiated Handedness Invariant evaluation block.")
+                            logger.info(
+                                f"Handedness Invariant evaluation block started.",
+                                extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"}
+                            )
                             progress_bar = st.progress(0)
                             status_text = st.info("Running Handedness matrix configuration...")
                             flipped_0 = run_evaluation_process(saved_model_path, model_type, apply_preprocess, "True", "0")
@@ -645,7 +705,10 @@ def main() -> None:
                             status_text.empty()
                             progress_bar.empty()
                             st.session_state.deep_handedness_data = {"flipped_0": flipped_0}
-                            logger.info(f"User '{st.session_state.user_name}' Handedness evaluation run complete.")
+                            logger.info(
+                                f"Handedness evaluation completed successfully.",
+                                extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"}
+                            )
                         st.rerun()
                 else:
                     handedness_slices = st.session_state.deep_handedness_data
@@ -721,12 +784,18 @@ def main() -> None:
                     if st.button("Evaluate Perpendicular Robustness"):
                         waiting_placeholder = st.empty()
                         if store["eval_lock"].locked():
-                            logger.warning(f"User '{st.session_state.user_name}' is waitlisted. Perpendicular evaluation lock held.")
+                            logger.warning(
+                                f"User is waitlisted. Perpendicular evaluation lock held.",
+                                extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"}
+                            )
                             waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
 
                         with store["eval_lock"]:
                             waiting_placeholder.empty()
-                            logger.info(f"User '{st.session_state.user_name}' initiated Horizontal Perpendicular Robustness metric block.")
+                            logger.info(
+                                f"Horizontal Perpendicular Robustness metric block started.",
+                                extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"}
+                            )
                             perp_configs = [
                                 ("unflipped_90", "False", "90"),
                                 ("unflipped_270", "False", "270"),
@@ -745,7 +814,10 @@ def main() -> None:
                             status_text.empty()
                             progress_bar.empty()
                             st.session_state.deep_perp_data = slices_p
-                            logger.info(f"User '{st.session_state.user_name}' Horizontal evaluation sequence matrix run complete.")
+                            logger.info(
+                                f"Horizontal evaluation sequence matrix completed successfully.",
+                                extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"}
+                            )
                         st.rerun()
                 else:
                     perp_slices = st.session_state.deep_perp_data
@@ -786,12 +858,18 @@ def main() -> None:
                     if st.button("Evaluate Inversion Robustness"):
                         waiting_placeholder = st.empty()
                         if store["eval_lock"].locked():
-                            logger.warning(f"User '{st.session_state.user_name}' is waitlisted. Inversion evaluation lock held.")
+                            logger.warning(
+                                f"User is waitlisted. Inversion evaluation lock held.",
+                                extra={"user": st.session_state.user_name, "comp": "INVERSION"}
+                            )
                             waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
 
                         with store["eval_lock"]:
                             waiting_placeholder.empty()
-                            logger.info(f"User '{st.session_state.user_name}' initiated Upside-down Inversion robustness metric block.")
+                            logger.info(
+                                f"Upside-down Inversion robustness metric block started.",
+                                extra={"user": st.session_state.user_name, "comp": "INVERSION"}
+                            )
                             inv_configs = [
                                 ("unflipped_180", "False", "180"),
                                 ("flipped_180", "True", "180")
@@ -808,7 +886,10 @@ def main() -> None:
                             status_text.empty()
                             progress_bar.empty()
                             st.session_state.deep_inversion_data = slices_i
-                            logger.info(f"User '{st.session_state.user_name}' Inversion matrix run complete.")
+                            logger.info(
+                                f"Inversion matrix completed successfully.",
+                                extra={"user": st.session_state.user_name, "comp": "INVERSION"}
+                            )
                         st.rerun()
                 else:
                     inv_slices = st.session_state.deep_inversion_data
@@ -832,12 +913,18 @@ def main() -> None:
                     if st.button("Evaluate Scale Robustness"):
                         waiting_placeholder = st.empty()
                         if store["eval_lock"].locked():
-                            logger.warning(f"User '{st.session_state.user_name}' is waitlisted. Zoom scale evaluation lock held.")
+                            logger.warning(
+                                f"User is waitlisted. Zoom scale evaluation lock held.",
+                                extra={"user": st.session_state.user_name, "comp": "ZOOM"}
+                            )
                             waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
 
                         with store["eval_lock"]:
                             waiting_placeholder.empty()
-                            logger.info(f"User '{st.session_state.user_name}' initiated Distance & Framing Scale Zoom robustness metric block.")
+                            logger.info(
+                                f"Distance & Framing Scale Zoom robustness metric block started.",
+                                extra={"user": st.session_state.user_name, "comp": "ZOOM"}
+                            )
                             zoom_configs = [
                                 ("zoomed_in", "in"),
                                 ("zoomed_out", "out")
@@ -854,7 +941,10 @@ def main() -> None:
                             status_text.empty()
                             progress_bar.empty()
                             st.session_state.deep_zoom_data = slices_z
-                            logger.info(f"User '{st.session_state.user_name}' Zoom scale evaluation matrix run complete.")
+                            logger.info(
+                                f"Zoom scale evaluation matrix completed successfully.",
+                                extra={"user": st.session_state.user_name, "comp": "ZOOM"}
+                            )
                         st.rerun()
                 else:
                     zoom_slices = st.session_state.deep_zoom_data
@@ -879,11 +969,11 @@ def main() -> None:
                     col_z1, col_z2 = st.columns(2)
                     with col_z1:
                         render_matrix_and_metric(
-                            zin_true, zin_pred, "Zoomed-In Profile (Close Framing)", zin_acc, acc
+                            zin_true, zin_pred, "Zoomed-In (Close Framing)", zin_acc, acc
                         )
                     with col_z2:
                         render_matrix_and_metric(
-                            zout_true, zout_pred, "Zoomed-Out Profile (Distant Framing)", zout_acc, acc
+                            zout_true, zout_pred, "Zoomed-Out (Distant Framing)", zout_acc, acc
                         )
 
 
