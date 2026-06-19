@@ -32,11 +32,10 @@ class CloudLogFormatter(logging.Formatter):
     RESET = "\033[0m"
     DARK_ORANGE = "\033[38;5;208m"
     GREEN = "\033[32m"
-    MAX_USER_LENGTH = 10
+    MAX_USER_LENGTH = 15
     MAX_COMP_LENGTH = 10
 
     def format(self, record):
-
         level_map = {
             "DEBUG": "DEBUG",
             "INFO": "INFO",
@@ -48,7 +47,7 @@ class CloudLogFormatter(logging.Formatter):
         user_formatted = (
             raw_user[:self.MAX_USER_LENGTH]
             if len(raw_user) > self.MAX_USER_LENGTH
-            else raw_user.ljust(self.MAX_USER_LENGTH)
+            else raw_user.center(self.MAX_USER_LENGTH)
         )
 
         raw_comp = str(getattr(record, "comp", "CORE"))
@@ -59,10 +58,10 @@ class CloudLogFormatter(logging.Formatter):
         )
 
         asctime = self.formatTime(record, self.datefmt)
-        levelname = f"{level_map.get(record.levelname, record.levelname):<5}"
+        levelname = level_map.get(record.levelname, f"{record.levelname:<5}")
         msg = record.getMessage()
 
-        if "waitlisted" in msg.lower() or "held" in msg.lower():
+        if "waitlisted" in msg.lower() or "held" in msg.lower() or "busy" in msg.lower():
             color_prefix = self.DARK_ORANGE
         elif "completed" in msg.lower() or "success" in msg.lower() or "complete" in msg.lower():
             color_prefix = self.GREEN
@@ -71,8 +70,8 @@ class CloudLogFormatter(logging.Formatter):
 
         # Assemble the final log stream grid string
         if color_prefix:
-            return f"{asctime} {levelname} {user_formatted} {comp_formatted} {color_prefix}{msg}{self.RESET}"
-        return f"{asctime} {levelname} {user_formatted} {comp_formatted} {msg}"
+            return f"{asctime} {levelname.strip()} {user_formatted} {comp_formatted} {color_prefix}{msg}{self.RESET}"
+        return f"{asctime} {levelname.strip()} {user_formatted} {comp_formatted} {msg}"
 
 # Instantiate stream handlers bound directly to sys.stdout
 log_handler = logging.StreamHandler(sys.stdout)
@@ -80,7 +79,6 @@ log_handler.setFormatter(CloudLogFormatter(datefmt="%Y-%m-%d %H:%M:%S"))
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-# Clear out pre-existing default stream wrappers to prevent duplicated lines
 logger.handlers = [log_handler]
 
 # Force stdout to be completely unbuffered on Streamlit Cloud containers
@@ -582,8 +580,15 @@ def main() -> None:
             uploaded_file = st.file_uploader("Select a Keras model file", type=["keras"])
 
             if uploaded_file:
-                file_hash = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
+                file_bytes = uploaded_file.getvalue()
+                file_hash = hashlib.sha256(file_bytes).hexdigest()
+                file_size_mb = len(file_bytes) / (1024 * 1024)
+
                 if st.session_state.get("last_processed_hash") != file_hash:
+                    logger.info(
+                        f"New model file uploaded successfully. Size: {file_size_mb:.2f} MB",
+                        extra={"user": st.session_state.user_name, "comp": "UPLOADER"}
+                    )
                     st.session_state.last_processed_hash = file_hash
                     st.session_state.baseline_run_data = None
                     st.session_state.deep_handedness_data = None
@@ -591,58 +596,84 @@ def main() -> None:
                     st.session_state.deep_zoom_data = None
                     st.session_state.deep_inversion_data = None
 
+                    # Polling State Waitlist Initializations
+                    st.session_state.waiting_for_baseline = False
+                    st.session_state.trigger_baseline_eval = False
+                    st.session_state.waiting_for_handedness = False
+                    st.session_state.trigger_handedness_eval = False
+                    st.session_state.waiting_for_perp = False
+                    st.session_state.trigger_perp_eval = False
+                    st.session_state.waiting_for_inversion = False
+                    st.session_state.trigger_inversion_eval = False
+                    st.session_state.waiting_for_zoom = False
+                    st.session_state.trigger_zoom_eval = False
+
                 if st.session_state.get("baseline_run_data") is None:
-                    waiting_placeholder = st.empty()
-                    if store["eval_lock"].locked():
+                    # ---- BASELINE NON-BLOCKING POLLING STATE VALVE ----
+                    if st.session_state.get("waiting_for_baseline", False):
+                        if store["eval_lock"].locked():
+                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically in 10 seconds...")
+                            time.sleep(10)
+                            st.rerun()
+                        else:
+                            st.session_state.waiting_for_baseline = False
+                            st.session_state.trigger_baseline_eval = True
+                            st.rerun()
+
+                    # Intercept execution thread if lock is currently held
+                    if store["eval_lock"].locked() and not st.session_state.get("trigger_baseline_eval", False):
                         logger.warning(
                             f"User is waitlisted. Baseline evaluation lock held.",
                             extra={"user": st.session_state.user_name, "comp": "BASELINE"}
                         )
-                        waiting_placeholder.warning("⏳ Another user is currently evaluating a model. Please wait, your evaluation will start automatically when the server is free...")
+                        st.session_state.waiting_for_baseline = True
+                        st.rerun()
 
-                    with store["eval_lock"]:
-                        waiting_placeholder.empty()
-                        try:
+                    st.session_state.trigger_baseline_eval = False
+
+                    try:
+                        with st.spinner("Analyzing model performance..."):
+                            with tempfile.NamedTemporaryFile(suffix=".keras", delete=False) as tmpf:
+                                tmpf.write(uploaded_file.getbuffer())
+                                saved_model_path = tmpf.name
+
+                            st.session_state.saved_model_path = saved_model_path
+
                             logger.info(
                                 f"Model evaluation started for type: {model_type}",
                                 extra={"user": st.session_state.user_name, "comp": "BASELINE"}
                             )
-                            with st.spinner("Analyzing model performance..."):
-                                with tempfile.NamedTemporaryFile(suffix=".keras", delete=False) as tmpf:
-                                    tmpf.write(uploaded_file.getbuffer())
-                                    saved_model_path = tmpf.name
-
-                                st.session_state.saved_model_path = saved_model_path
-
+                            with store["eval_lock"]:
                                 baseline_run = run_evaluation_process(
                                     saved_model_path, model_type, apply_preprocess, "False", "0"
                                 )
-                                st.session_state.baseline_run_data = baseline_run
+                            st.session_state.baseline_run_data = baseline_run
 
-                                acc = baseline_run["overall_accuracy"]
-                                result = pd.DataFrame([
-                                    {
-                                        "accuracy": round(acc, 4),
-                                        "participant": st.session_state.user_name,
-                                        "batch": st.session_state.batch,
-                                        "submission_time": pd.Timestamp.now().isoformat(),
-                                        "model_type": model_type,
-                                    },
-                                ])
-                                update_submissions(result)
-                                logger.info(
-                                    f"Baseline computation completed successfully. Accuracy: {acc:.4f}",
-                                    extra={"user": st.session_state.user_name, "comp": "BASELINE"}
-                                )
-                        except Exception as e:
-                            logger.error(
-                                f"Baseline matrix evaluation failed: {str(e)}",
+                            acc = baseline_run["overall_accuracy"]
+                            result = pd.DataFrame([
+                                {
+                                    "accuracy": round(acc, 4),
+                                    "participant": st.session_state.user_name,
+                                    "batch": st.session_state.batch,
+                                    "submission_time": pd.Timestamp.now().isoformat(),
+                                    "model_type": model_type,
+                                },
+                            ])
+                            update_submissions(result)
+                            logger.info(
+                                f"Baseline computation completed successfully. Accuracy: {acc:.4f}",
                                 extra={"user": st.session_state.user_name, "comp": "BASELINE"}
                             )
-                            st.error(f"Error evaluating model baseline: {e}")
-                        finally:
-                            uploaded_file = None
-                            gc.collect()
+                        st.rerun()
+                    except Exception as e:
+                        logger.error(
+                            f"Baseline matrix evaluation failed: {str(e)}",
+                            extra={"user": st.session_state.user_name, "comp": "BASELINE"}
+                        )
+                        st.error(f"Error evaluating model baseline: {e}")
+                    finally:
+                        uploaded_file = None
+                        gc.collect()
 
                 if st.session_state.get("baseline_run_data") is not None:
                     baseline_run = st.session_state.baseline_run_data
@@ -696,32 +727,45 @@ def main() -> None:
                 # --- STEP 1: HANDEDNESS INVARIANT VERIFICATION ---
                 st.markdown("### 🖐️ Handedness Invariant Verification")
                 if st.session_state.get("deep_handedness_data") is None:
-                    if st.button("Evaluate Handedness Robustness"):
-                        waiting_placeholder = st.empty()
+                    # ---- HANDEDNESS NON-BLOCKING POLLING AUTOMATION VALVE ----
+                    if st.session_state.get("waiting_for_handedness", False):
                         if store["eval_lock"].locked():
+                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically in 10 seconds...")
+                            time.sleep(10)
+                            st.rerun()
+                        else:
+                            st.session_state.waiting_for_handedness = False
+                            st.session_state.trigger_handedness_eval = True
+                            st.rerun()
+
+                    if st.button("Evaluate Handedness Robustness") or st.session_state.get("trigger_handedness_eval", False):
+                        if store["eval_lock"].locked() and not st.session_state.get("trigger_handedness_eval", False):
                             logger.warning(
                                 f"User is waitlisted. Handedness evaluation lock held.",
                                 extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"}
                             )
-                            waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
+                            st.session_state.waiting_for_handedness = True
+                            st.rerun()
 
+                        st.session_state.trigger_handedness_eval = False
+                        progress_bar = st.progress(0)
+                        status_text = st.info("Running Handedness matrix configuration...")
+                        
+                        logger.info(
+                            f"Handedness Invariant evaluation block started.",
+                            extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"}
+                        )
                         with store["eval_lock"]:
-                            waiting_placeholder.empty()
-                            logger.info(
-                                f"Handedness Invariant evaluation block started.",
-                                extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"}
-                            )
-                            progress_bar = st.progress(0)
-                            status_text = st.info("Running Handedness matrix configuration...")
                             flipped_0 = run_evaluation_process(saved_model_path, model_type, apply_preprocess, "True", "0")
-                            progress_bar.progress(1.0)
-                            status_text.empty()
-                            progress_bar.empty()
-                            st.session_state.deep_handedness_data = {"flipped_0": flipped_0}
-                            logger.info(
-                                f"Handedness evaluation completed successfully.",
-                                extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"}
-                            )
+                        
+                        progress_bar.progress(1.0)
+                        status_text.empty()
+                        progress_bar.empty()
+                        st.session_state.deep_handedness_data = {"flipped_0": flipped_0}
+                        logger.info(
+                            f"Handedness evaluation completed successfully.",
+                            extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"}
+                        )
                         st.rerun()
                 else:
                     handedness_slices = st.session_state.deep_handedness_data
@@ -794,43 +838,54 @@ def main() -> None:
                 st.write("")
                 st.markdown("### 🫱 Horizontal Orientations of Hands (90° & -90°)")
                 if st.session_state.get("deep_perp_data") is None:
-                    if st.button("Evaluate Perpendicular Robustness"):
-                        waiting_placeholder = st.empty()
+                    # ---- HORIZONTAL ORIENTATIONS NON-BLOCKING POLLING AUTOMATION VALVE ----
+                    if st.session_state.get("waiting_for_perp", False):
                         if store["eval_lock"].locked():
+                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically in 10 seconds...")
+                            time.sleep(10)
+                            st.rerun()
+                        else:
+                            st.session_state.waiting_for_perp = False
+                            st.session_state.trigger_perp_eval = True
+                            st.rerun()
+
+                    if st.button("Evaluate Perpendicular Robustness") or st.session_state.get("trigger_perp_eval", False):
+                        if store["eval_lock"].locked() and not st.session_state.get("trigger_perp_eval", False):
                             logger.warning(
                                 f"User is waitlisted. Perpendicular evaluation lock held.",
                                 extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"}
                             )
-                            waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
+                            st.session_state.waiting_for_perp = True
+                            st.rerun()
 
+                        st.session_state.trigger_perp_eval = False
+                        perp_configs = [
+                            ("unflipped_90", "False", "90"),
+                            ("unflipped_270", "False", "270"),
+                            ("flipped_90", "True", "90"),
+                            ("flipped_270", "True", "270")
+                        ]
+                        slices_p = {}
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+
+                        logger.info(
+                            f"Horizontal Perpendicular Robustness metric block started.",
+                            extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"}
+                        )
                         with store["eval_lock"]:
-                            waiting_placeholder.empty()
-                            logger.info(
-                                f"Horizontal Perpendicular Robustness metric block started.",
-                                extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"}
-                            )
-                            perp_configs = [
-                                ("unflipped_90", "False", "90"),
-                                ("unflipped_270", "False", "270"),
-                                ("flipped_90", "True", "90"),
-                                ("flipped_270", "True", "270")
-                            ]
-                            slices_p = {}
-                            progress_bar = st.progress(0)
-                            status_text = st.empty()
-
                             for idx, (s_name, f_v, r_v) in enumerate(perp_configs):
                                 status_text.info(f"Processing evaluation slice [{idx + 1}/{len(perp_configs)}]: Flip={f_v}, Rotate={r_v}°")
                                 slices_p[s_name] = run_evaluation_process(saved_model_path, model_type, apply_preprocess, f_v, r_v)
                                 progress_bar.progress((idx + 1) / len(perp_configs))
 
-                            status_text.empty()
-                            progress_bar.empty()
-                            st.session_state.deep_perp_data = slices_p
-                            logger.info(
-                                f"Horizontal evaluation sequence matrix completed successfully.",
-                                extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"}
-                            )
+                        status_text.empty()
+                        progress_bar.empty()
+                        st.session_state.deep_perp_data = slices_p
+                        logger.info(
+                            f"Horizontal evaluation sequence matrix completed successfully.",
+                            extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"}
+                        )
                         st.rerun()
                 else:
                     perp_slices = st.session_state.deep_perp_data
@@ -868,41 +923,52 @@ def main() -> None:
                 st.write("")
                 st.markdown("### 🙃 Upside-down Hands")
                 if st.session_state.get("deep_inversion_data") is None:
-                    if st.button("Evaluate Inversion Robustness"):
-                        waiting_placeholder = st.empty()
+                    # ---- INVERSION NON-BLOCKING POLLING AUTOMATION VALVE ----
+                    if st.session_state.get("waiting_for_inversion", False):
                         if store["eval_lock"].locked():
+                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically in 10 seconds...")
+                            time.sleep(10)
+                            st.rerun()
+                        else:
+                            st.session_state.waiting_for_inversion = False
+                            st.session_state.trigger_inversion_eval = True
+                            st.rerun()
+
+                    if st.button("Evaluate Inversion Robustness") or st.session_state.get("trigger_inversion_eval", False):
+                        if store["eval_lock"].locked() and not st.session_state.get("trigger_inversion_eval", False):
                             logger.warning(
                                 f"User is waitlisted. Inversion evaluation lock held.",
                                 extra={"user": st.session_state.user_name, "comp": "INVERSION"}
                             )
-                            waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
+                            st.session_state.waiting_for_inversion = True
+                            st.rerun()
 
+                        st.session_state.trigger_inversion_eval = False
+                        inv_configs = [
+                            ("unflipped_180", "False", "180"),
+                            ("flipped_180", "True", "180")
+                        ]
+                        slices_i = {}
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+
+                        logger.info(
+                            f"Upside-down Inversion robustness metric block started.",
+                            extra={"user": st.session_state.user_name, "comp": "INVERSION"}
+                        )
                         with store["eval_lock"]:
-                            waiting_placeholder.empty()
-                            logger.info(
-                                f"Upside-down Inversion robustness metric block started.",
-                                extra={"user": st.session_state.user_name, "comp": "INVERSION"}
-                            )
-                            inv_configs = [
-                                ("unflipped_180", "False", "180"),
-                                ("flipped_180", "True", "180")
-                            ]
-                            slices_i = {}
-                            progress_bar = st.progress(0)
-                            status_text = st.empty()
-
                             for idx, (s_name, f_v, r_v) in enumerate(inv_configs):
                                 status_text.info(f"Processing evaluation slice [{idx + 1}/{len(inv_configs)}]: Flip={f_v}, Rotate={r_v}°")
                                 slices_i[s_name] = run_evaluation_process(saved_model_path, model_type, apply_preprocess, f_v, r_v)
                                 progress_bar.progress((idx + 1) / len(inv_configs))
 
-                            status_text.empty()
-                            progress_bar.empty()
-                            st.session_state.deep_inversion_data = slices_i
-                            logger.info(
-                                f"Inversion matrix completed successfully.",
-                                extra={"user": st.session_state.user_name, "comp": "INVERSION"}
-                            )
+                        status_text.empty()
+                        progress_bar.empty()
+                        st.session_state.deep_inversion_data = slices_i
+                        logger.info(
+                            f"Inversion matrix completed successfully.",
+                            extra={"user": st.session_state.user_name, "comp": "INVERSION"}
+                        )
                         st.rerun()
                 else:
                     inv_slices = st.session_state.deep_inversion_data
@@ -923,41 +989,52 @@ def main() -> None:
                 st.write("")
                 st.markdown("### 📏 Distance & Framing Invariance (Scale/Zoom)")
                 if st.session_state.get("deep_zoom_data") is None:
-                    if st.button("Evaluate Scale Robustness"):
-                        waiting_placeholder = st.empty()
+                    # ---- ZOOM NON-BLOCKING POLLING AUTOMATION VALVE ----
+                    if st.session_state.get("waiting_for_zoom", False):
                         if store["eval_lock"].locked():
+                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically in 10 seconds...")
+                            time.sleep(10)
+                            st.rerun()
+                        else:
+                            st.session_state.waiting_for_zoom = False
+                            st.session_state.trigger_zoom_eval = True
+                            st.rerun()
+
+                    if st.button("Evaluate Scale Robustness") or st.session_state.get("trigger_zoom_eval", False):
+                        if store["eval_lock"].locked() and not st.session_state.get("trigger_zoom_eval", False):
                             logger.warning(
                                 f"User is waitlisted. Zoom scale evaluation lock held.",
                                 extra={"user": st.session_state.user_name, "comp": "ZOOM"}
                             )
-                            waiting_placeholder.warning("⏳ Another user is running evaluations. Please wait, your evaluation will start automatically when the server is free...")
+                            st.session_state.waiting_for_zoom = True
+                            st.rerun()
 
+                        st.session_state.trigger_zoom_eval = False
+                        zoom_configs = [
+                            ("zoomed_in", "in"),
+                            ("zoomed_out", "out")
+                        ]
+                        slices_z = {}
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+
+                        logger.info(
+                            f"Distance & Framing Scale Zoom robustness metric block started.",
+                            extra={"user": st.session_state.user_name, "comp": "ZOOM"}
+                        )
                         with store["eval_lock"]:
-                            waiting_placeholder.empty()
-                            logger.info(
-                                f"Distance & Framing Scale Zoom robustness metric block started.",
-                                extra={"user": st.session_state.user_name, "comp": "ZOOM"}
-                            )
-                            zoom_configs = [
-                                ("zoomed_in", "in"),
-                                ("zoomed_out", "out")
-                            ]
-                            slices_z = {}
-                            progress_bar = st.progress(0)
-                            status_text = st.empty()
-
                             for idx, (s_name, zoom_flag) in enumerate(zoom_configs):
                                 status_text.info(f"Processing scaling evaluation matrix [{idx + 1}/{len(zoom_configs)}]: Zoom Mode='{zoom_flag}'")
                                 slices_z[s_name] = run_evaluation_process(saved_model_path, model_type, apply_preprocess, "False", "0", zoom_flag)
                                 progress_bar.progress((idx + 1) / len(zoom_configs))
 
-                            status_text.empty()
-                            progress_bar.empty()
-                            st.session_state.deep_zoom_data = slices_z
-                            logger.info(
-                                f"Zoom scale evaluation matrix completed successfully.",
-                                extra={"user": st.session_state.user_name, "comp": "ZOOM"}
-                            )
+                        status_text.empty()
+                        progress_bar.empty()
+                        st.session_state.deep_zoom_data = slices_z
+                        logger.info(
+                            f"Zoom scale evaluation matrix completed successfully.",
+                            extra={"user": st.session_state.user_name, "comp": "ZOOM"}
+                        )
                         st.rerun()
                 else:
                     zoom_slices = st.session_state.deep_zoom_data
