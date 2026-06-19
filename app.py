@@ -30,9 +30,9 @@ from streamlit_gsheets import GSheetsConnection
 class CloudLogFormatter(logging.Formatter):
     # ANSI Terminal Palette Codes
     RESET = "\033[0m"
-    DARK_ORANGE = "\033[38;5;208m"
+    ORANGE = "\033[33m"
     GREEN = "\033[32m"
-    MAX_USER_LENGTH = 15
+    MAX_USER_LENGTH = 10
     MAX_COMP_LENGTH = 10
 
     def format(self, record):
@@ -47,7 +47,7 @@ class CloudLogFormatter(logging.Formatter):
         user_formatted = (
             raw_user[:self.MAX_USER_LENGTH]
             if len(raw_user) > self.MAX_USER_LENGTH
-            else raw_user.center(self.MAX_USER_LENGTH)
+            else raw_user.ljust(self.MAX_USER_LENGTH)
         )
 
         raw_comp = str(getattr(record, "comp", "CORE"))
@@ -61,17 +61,17 @@ class CloudLogFormatter(logging.Formatter):
         levelname = level_map.get(record.levelname, f"{record.levelname:<5}")
         msg = record.getMessage()
 
-        if "waitlisted" in msg.lower() or "held" in msg.lower() or "busy" in msg.lower():
-            color_prefix = self.DARK_ORANGE
-        elif "completed" in msg.lower() or "success" in msg.lower() or "complete" in msg.lower():
+        if "waitlisted" in msg.lower():
+            color_prefix = self.ORANGE
+        elif "completed" in msg.lower():
             color_prefix = self.GREEN
         else:
             color_prefix = ""
 
         # Assemble the final log stream grid string
         if color_prefix:
-            return f"{asctime} {levelname.strip()} {user_formatted} {comp_formatted} {color_prefix}{msg}{self.RESET}"
-        return f"{asctime} {levelname.strip()} {user_formatted} {comp_formatted} {msg}"
+            return f"{asctime} {levelname} - {user_formatted} {comp_formatted} {color_prefix}{msg}{self.RESET}"
+        return f"{asctime} {levelname} - {user_formatted} {comp_formatted} {msg}"
 
 # Instantiate stream handlers bound directly to sys.stdout
 log_handler = logging.StreamHandler(sys.stdout)
@@ -586,8 +586,8 @@ def main() -> None:
 
                 if st.session_state.get("last_processed_hash") != file_hash:
                     logger.info(
-                        f"New model file uploaded successfully. Size: {file_size_mb:.2f} MB",
-                        extra={"user": st.session_state.user_name, "comp": "UPLOADER"}
+                        f"{model_type} uploaded successfully. Size: {file_size_mb:.2f} MB",
+                        extra={"user": st.session_state.user_name, "comp": "UPLOADER"},
                     )
                     st.session_state.last_processed_hash = file_hash
                     st.session_state.baseline_run_data = None
@@ -623,8 +623,8 @@ def main() -> None:
                     # Intercept execution thread if lock is currently held
                     if store["eval_lock"].locked() and not st.session_state.get("trigger_baseline_eval", False):
                         logger.warning(
-                            f"User is waitlisted. Baseline evaluation lock held.",
-                            extra={"user": st.session_state.user_name, "comp": "BASELINE"}
+                            f"User is waitlisted.",
+                            extra={"user": st.session_state.user_name, "comp": "BASELINE"},
                         )
                         st.session_state.waiting_for_baseline = True
                         st.rerun()
@@ -640,8 +640,8 @@ def main() -> None:
                             st.session_state.saved_model_path = saved_model_path
 
                             logger.info(
-                                f"Model evaluation started for type: {model_type}",
-                                extra={"user": st.session_state.user_name, "comp": "BASELINE"}
+                                f"Evaluation started: {model_type}",
+                                extra={"user": st.session_state.user_name, "comp": "BASELINE"},
                             )
                             with store["eval_lock"]:
                                 baseline_run = run_evaluation_process(
@@ -661,14 +661,14 @@ def main() -> None:
                             ])
                             update_submissions(result)
                             logger.info(
-                                f"Baseline computation completed successfully. Accuracy: {acc:.4f}",
-                                extra={"user": st.session_state.user_name, "comp": "BASELINE"}
+                                f"Completed. Accuracy: {acc:.4f}",
+                                extra={"user": st.session_state.user_name, "comp": "BASELINE"},
                             )
                         st.rerun()
                     except Exception as e:
                         logger.error(
-                            f"Baseline matrix evaluation failed: {str(e)}",
-                            extra={"user": st.session_state.user_name, "comp": "BASELINE"}
+                            f"Baseline evaluation failed: {str(e)}",
+                            extra={"user": st.session_state.user_name, "comp": "BASELINE"},
                         )
                         st.error(f"Error evaluating model baseline: {e}")
                     finally:
@@ -741,7 +741,7 @@ def main() -> None:
                     if st.button("Evaluate Handedness Robustness") or st.session_state.get("trigger_handedness_eval", False):
                         if store["eval_lock"].locked() and not st.session_state.get("trigger_handedness_eval", False):
                             logger.warning(
-                                f"User is waitlisted. Handedness evaluation lock held.",
+                                f"User is waitlisted.",
                                 extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"}
                             )
                             st.session_state.waiting_for_handedness = True
@@ -752,8 +752,8 @@ def main() -> None:
                         status_text = st.info("Running Handedness matrix configuration...")
                         
                         logger.info(
-                            f"Handedness Invariant evaluation block started.",
-                            extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"}
+                            f"Evaluation started: {model_type}",
+                            extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"},
                         )
                         with store["eval_lock"]:
                             flipped_0 = run_evaluation_process(saved_model_path, model_type, apply_preprocess, "True", "0")
@@ -763,8 +763,8 @@ def main() -> None:
                         progress_bar.empty()
                         st.session_state.deep_handedness_data = {"flipped_0": flipped_0}
                         logger.info(
-                            f"Handedness evaluation completed successfully.",
-                            extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"}
+                            f"Completed.",
+                            extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"},
                         )
                         st.rerun()
                 else:
@@ -852,8 +852,8 @@ def main() -> None:
                     if st.button("Evaluate Perpendicular Robustness") or st.session_state.get("trigger_perp_eval", False):
                         if store["eval_lock"].locked() and not st.session_state.get("trigger_perp_eval", False):
                             logger.warning(
-                                f"User is waitlisted. Perpendicular evaluation lock held.",
-                                extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"}
+                                f"User is waitlisted.",
+                                extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"},
                             )
                             st.session_state.waiting_for_perp = True
                             st.rerun()
@@ -870,8 +870,8 @@ def main() -> None:
                         status_text = st.empty()
 
                         logger.info(
-                            f"Horizontal Perpendicular Robustness metric block started.",
-                            extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"}
+                            f"Evaluation started: {model_type}",
+                            extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"},
                         )
                         with store["eval_lock"]:
                             for idx, (s_name, f_v, r_v) in enumerate(perp_configs):
@@ -883,7 +883,7 @@ def main() -> None:
                         progress_bar.empty()
                         st.session_state.deep_perp_data = slices_p
                         logger.info(
-                            f"Horizontal evaluation sequence matrix completed successfully.",
+                            f"Completed.",
                             extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"}
                         )
                         st.rerun()
@@ -937,7 +937,7 @@ def main() -> None:
                     if st.button("Evaluate Inversion Robustness") or st.session_state.get("trigger_inversion_eval", False):
                         if store["eval_lock"].locked() and not st.session_state.get("trigger_inversion_eval", False):
                             logger.warning(
-                                f"User is waitlisted. Inversion evaluation lock held.",
+                                f"User is waitlisted.",
                                 extra={"user": st.session_state.user_name, "comp": "INVERSION"}
                             )
                             st.session_state.waiting_for_inversion = True
@@ -953,8 +953,8 @@ def main() -> None:
                         status_text = st.empty()
 
                         logger.info(
-                            f"Upside-down Inversion robustness metric block started.",
-                            extra={"user": st.session_state.user_name, "comp": "INVERSION"}
+                            f"Evaluation started: {model_type}",
+                            extra={"user": st.session_state.user_name, "comp": "INVERSION"},
                         )
                         with store["eval_lock"]:
                             for idx, (s_name, f_v, r_v) in enumerate(inv_configs):
@@ -966,8 +966,8 @@ def main() -> None:
                         progress_bar.empty()
                         st.session_state.deep_inversion_data = slices_i
                         logger.info(
-                            f"Inversion matrix completed successfully.",
-                            extra={"user": st.session_state.user_name, "comp": "INVERSION"}
+                            f"Completed.",
+                            extra={"user": st.session_state.user_name, "comp": "INVERSION"},
                         )
                         st.rerun()
                 else:
@@ -1003,8 +1003,8 @@ def main() -> None:
                     if st.button("Evaluate Scale Robustness") or st.session_state.get("trigger_zoom_eval", False):
                         if store["eval_lock"].locked() and not st.session_state.get("trigger_zoom_eval", False):
                             logger.warning(
-                                f"User is waitlisted. Zoom scale evaluation lock held.",
-                                extra={"user": st.session_state.user_name, "comp": "ZOOM"}
+                                f"User is waitlisted.",
+                                extra={"user": st.session_state.user_name, "comp": "ZOOM"},
                             )
                             st.session_state.waiting_for_zoom = True
                             st.rerun()
@@ -1019,8 +1019,8 @@ def main() -> None:
                         status_text = st.empty()
 
                         logger.info(
-                            f"Distance & Framing Scale Zoom robustness metric block started.",
-                            extra={"user": st.session_state.user_name, "comp": "ZOOM"}
+                            f"Evaluation started: {model_type}",
+                            extra={"user": st.session_state.user_name, "comp": "ZOOM"},
                         )
                         with store["eval_lock"]:
                             for idx, (s_name, zoom_flag) in enumerate(zoom_configs):
@@ -1032,8 +1032,8 @@ def main() -> None:
                         progress_bar.empty()
                         st.session_state.deep_zoom_data = slices_z
                         logger.info(
-                            f"Zoom scale evaluation matrix completed successfully.",
-                            extra={"user": st.session_state.user_name, "comp": "ZOOM"}
+                            f"Completed.",
+                            extra={"user": st.session_state.user_name, "comp": "ZOOM"},
                         )
                         st.rerun()
                 else:
