@@ -63,7 +63,7 @@ class CloudLogFormatter(logging.Formatter):
 
         if "waitlisted" in msg.lower():
             color_prefix = self.ORANGE
-        elif "completed" in msg.lower():
+        elif "completed" in msg.lower() or "success" in msg.lower():
             color_prefix = self.GREEN
         else:
             color_prefix = ""
@@ -612,8 +612,8 @@ def main() -> None:
                     # ---- BASELINE NON-BLOCKING POLLING STATE VALVE ----
                     if st.session_state.get("waiting_for_baseline", False):
                         if store["eval_lock"].locked():
-                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically in 10 seconds...")
-                            time.sleep(10)
+                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically...")
+                            time.sleep(20)
                             st.rerun()
                         else:
                             st.session_state.waiting_for_baseline = False
@@ -730,8 +730,8 @@ def main() -> None:
                     # ---- HANDEDNESS NON-BLOCKING POLLING AUTOMATION VALVE ----
                     if st.session_state.get("waiting_for_handedness", False):
                         if store["eval_lock"].locked():
-                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically in 10 seconds...")
-                            time.sleep(10)
+                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically...")
+                            time.sleep(20)
                             st.rerun()
                         else:
                             st.session_state.waiting_for_handedness = False
@@ -841,8 +841,8 @@ def main() -> None:
                     # ---- HORIZONTAL ORIENTATIONS NON-BLOCKING POLLING AUTOMATION VALVE ----
                     if st.session_state.get("waiting_for_perp", False):
                         if store["eval_lock"].locked():
-                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically in 10 seconds...")
-                            time.sleep(10)
+                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically...")
+                            time.sleep(20)
                             st.rerun()
                         else:
                             st.session_state.waiting_for_perp = False
@@ -926,8 +926,8 @@ def main() -> None:
                     # ---- INVERSION NON-BLOCKING POLLING AUTOMATION VALVE ----
                     if st.session_state.get("waiting_for_inversion", False):
                         if store["eval_lock"].locked():
-                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically in 10 seconds...")
-                            time.sleep(10)
+                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically...")
+                            time.sleep(20)
                             st.rerun()
                         else:
                             st.session_state.waiting_for_inversion = False
@@ -992,8 +992,8 @@ def main() -> None:
                     # ---- ZOOM NON-BLOCKING POLLING AUTOMATION VALVE ----
                     if st.session_state.get("waiting_for_zoom", False):
                         if store["eval_lock"].locked():
-                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically in 10 seconds...")
-                            time.sleep(10)
+                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically...")
+                            time.sleep(20)
                             st.rerun()
                         else:
                             st.session_state.waiting_for_zoom = False
