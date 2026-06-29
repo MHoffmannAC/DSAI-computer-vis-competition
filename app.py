@@ -1,12 +1,14 @@
 import gc
 import hashlib
-import re
-import tempfile
-import time
-from pathlib import Path
 import json
+import logging
+import re
 import subprocess
 import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
 
 import altair as alt
 import gspread
@@ -20,6 +22,69 @@ from gspread.exceptions import WorksheetNotFound
 from PIL import Image
 from sklearn.metrics import confusion_matrix
 from streamlit_gsheets import GSheetsConnection
+
+# ==============================================================================
+# ==== STREAMLIT CLOUD LIVE ANSI-COLOR GRID LOGGING CONFIGURATION ====
+# ==============================================================================
+
+class CloudLogFormatter(logging.Formatter):
+    # ANSI Terminal Palette Codes
+    RESET = "\033[0m"
+    ORANGE = "\033[33m"
+    GREEN = "\033[32m"
+    MAX_USER_LENGTH = 10
+    MAX_COMP_LENGTH = 10
+
+    def format(self, record):
+        level_map = {
+            "DEBUG": "DEBUG",
+            "INFO": "INFO",
+            "WARNING": "WARN",
+            "ERROR": "ERROR",
+            "CRITICAL": "FATAL",
+        }
+        raw_user = str(getattr(record, "user", "SYSTEM"))
+        user_formatted = (
+            raw_user[:self.MAX_USER_LENGTH]
+            if len(raw_user) > self.MAX_USER_LENGTH
+            else raw_user.ljust(self.MAX_USER_LENGTH)
+        )
+
+        raw_comp = str(getattr(record, "comp", "CORE"))
+        comp_formatted = (
+            raw_comp[:self.MAX_COMP_LENGTH]
+            if len(raw_comp) > self.MAX_COMP_LENGTH
+            else raw_comp.ljust(self.MAX_COMP_LENGTH)
+        )
+
+        asctime = self.formatTime(record, self.datefmt)
+        levelname = level_map.get(record.levelname, f"{record.levelname:<5}")
+        msg = record.getMessage()
+
+        if "waitlisted" in msg.lower():
+            color_prefix = self.ORANGE
+        elif "completed" in msg.lower() or "success" in msg.lower():
+            color_prefix = self.GREEN
+        else:
+            color_prefix = ""
+
+        # Assemble the final log stream grid string
+        if color_prefix:
+            return f"{asctime} {levelname} - {user_formatted} {comp_formatted} {color_prefix}{msg}{self.RESET}"
+        return f"{asctime} {levelname} - {user_formatted} {comp_formatted} {msg}"
+
+# Instantiate stream handlers bound directly to sys.stdout
+log_handler = logging.StreamHandler(sys.stdout)
+log_handler.setFormatter(CloudLogFormatter(datefmt="%Y-%m-%d %H:%M:%S"))
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger.handlers = [log_handler]
+
+# Force stdout to be completely unbuffered on Streamlit Cloud containers
+sys.stdout.reconfigure(line_buffering=True)
+
+# ==============================================================================
 
 ALLOWED_MODELS = [
     "Custom",
@@ -47,21 +112,14 @@ ALLOWED_MODELS = [
     "VGG16",
     "VGG19",
     "Xception",
-]
+ ]
 
-# ==== CONFIGURATION & CONSTANTS ====
 TEST_IMAGE_DIR = "test_images"
 CLASS_NAMES = ["A", "B", "C"]
 REQUIRED_COLUMNS = ["participant", "accuracy", "submission_time", "batch", "model_type"]
 
-
 help_leaderboard_toggle = """By default, the leaderboard displays one entry per participant and model type.\n\n
 Toggle if you prefer to see only one entry per participant.
-"""
-
-help_model_selection = """Please select your used model.\n\n
-Select the model family in case you used transfer learning or select "Custom" otherwise.\n\n
-The app uses this information to handle preprocessing as well as for leaderboard purposes.
 """
 
 help_preprocessing = """Select whether or not your model is performing
@@ -75,12 +133,9 @@ If you select `No`, the app will apply
 - the model family's own preprocessor for pre-trained models
 """
 
-# ==== GLOBAL STORE & STATE ====
-
 
 @st.cache_resource
 def get_global_store() -> dict:
-    """Initializes the global in-memory store for the application session."""
     return {
         "submissions": {},
         "alltime_submissions": None,
@@ -90,13 +145,11 @@ def get_global_store() -> dict:
         "batches_last_updated": None,
         "gsheet_conn": None,
         "configured_batches": set(),
-        "is_evaluating": False,
-        "eval_start_time": None,
+        "eval_lock": threading.Lock(),
     }
 
 
 def state_inits() -> None:
-    """Initializes session state variables and the initial GSheet connection."""
     if "user_name" not in st.session_state:
         st.session_state.user_name = None
     if "code_input" not in st.session_state:
@@ -116,7 +169,6 @@ def state_inits() -> None:
 
 
 def load_alltime_data(store: dict) -> None:
-    """Aggregates data from all batches (EXCEPT anonymous) for the global leaderboard."""
     try:
         batches_df = store["gsheet_conn"].read(worksheet="Batches", ttl=0)
         batches = batches_df["Batch"].tolist()
@@ -139,18 +191,13 @@ def load_alltime_data(store: dict) -> None:
         store["alltime_submissions"] = pd.DataFrame()
 
 
-# ==== CACHED HELPER FUNCTIONS ====
-
-
 @st.cache_resource
 def get_gsheet_connection() -> GSheetsConnection:
-    """Returns the Streamlit GSheets connection object."""
     return st.connection("gsheets", type=GSheetsConnection)
 
 
 @st.cache_resource
 def configure_gsheet(_store: dict, batch: str | None = None) -> str:
-    """Configures the GSheet connection and ensures specific worksheets exist."""
     try:
         if _store["gsheet_conn"] is None:
             _store["gsheet_conn"] = get_gsheet_connection()
@@ -165,7 +212,6 @@ def configure_gsheet(_store: dict, batch: str | None = None) -> str:
 
 
 def display_admin() -> None:
-    """Provides UI for instructors to clear the global cache."""
     st.divider()
     st.subheader("🛠️ Admin Settings", anchor=False)
     if st.button("Clear cached resources"):
@@ -176,11 +222,7 @@ def display_admin() -> None:
         st.rerun()
 
 
-# ==== GSHEETS UTILS ====
-
-
 def _open_spreadsheet() -> gspread.Spreadsheet:
-    """Opens the raw gspread client for structural changes."""
     creds_dict = dict(st.secrets["connections"]["gsheets"])
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -192,7 +234,6 @@ def _open_spreadsheet() -> gspread.Spreadsheet:
 
 
 def ensure_batch_sheet_exists(batch: str, conn: GSheetsConnection) -> None:
-    """Checks if a worksheet exists for the batch; creates it if not."""
     try:
         conn.read(worksheet=batch, ttl=0)
     except WorksheetNotFound:
@@ -204,15 +245,11 @@ def ensure_batch_sheet_exists(batch: str, conn: GSheetsConnection) -> None:
         st.error(f"Failed to verify/create worksheet: {e}")
 
 
-# ==== LEADERBOARD LOGIC ====
-
-
 def generate_leaderboard_dataframe(
     submissions_df: pd.DataFrame,
     *,
     reduce_leaderboard: bool,
 ) -> pd.DataFrame:
-    """Processes submission data into a leaderboard format."""
     if submissions_df.empty:
         return pd.DataFrame()
 
@@ -234,7 +271,6 @@ def generate_leaderboard_dataframe(
 
 
 def build_leaderboards() -> None:
-    """Rebuilds the processed leaderboards in the store."""
     store = get_global_store()
     for batch, df in store["submissions"].items():
         if batch != "anonymous" and df is not None and not df.empty:
@@ -256,7 +292,6 @@ def build_leaderboards() -> None:
 
 
 def update_submissions(participant_results: pd.DataFrame) -> None:
-    """Writes a new result to GSheets and updates memory."""
     store = get_global_store()
     batch = st.session_state.batch
 
@@ -281,18 +316,13 @@ def update_submissions(participant_results: pd.DataFrame) -> None:
         st.error(f"Could not update Google Sheets: {e}")
 
 
-# ==== UI COMPONENTS ====
-
-
 def get_participant_info() -> None:
-    """Handles Login and Batch authentication."""
     store = get_global_store()
 
     if st.session_state.user_name and st.session_state.batch:
-        # Check if we need to load the submissions for chart plotting/recording
         if st.session_state.batch not in store["submissions"]:
             try:
-                configure_gsheet(_store=store, batch = st.session_state.batch)
+                configure_gsheet(_store=store, batch=st.session_state.batch)
                 store["submissions"][st.session_state.batch] = store[
                     "gsheet_conn"
                 ].read(worksheet=st.session_state.batch, ttl=0)
@@ -304,7 +334,6 @@ def get_participant_info() -> None:
         st.info(
             f"Logged in as: **{st.session_state.user_name}** from **{st.session_state.batch}**",
         )
-
     else:
         st.write("Please log in with the details provided by your instructor.")
         st.divider()
@@ -341,7 +370,6 @@ def get_participant_info() -> None:
 
 
 def plot_submissions(participant_name: str) -> None:
-    """Plot submission accuracy for a participant over time."""
     store = get_global_store()
     batch = st.session_state.batch
     if batch not in store["submissions"]:
@@ -361,9 +389,7 @@ def plot_submissions(participant_name: str) -> None:
             participant_submissions["submission_time"],
             format="ISO8601",
         )
-        participant_submissions = participant_submissions.sort_values(
-            "submission_time",
-        )  # .set_index("submission_time")
+        participant_submissions = participant_submissions.sort_values("submission_time")
         line = (
             alt.Chart(participant_submissions)
             .mark_line()
@@ -373,10 +399,9 @@ def plot_submissions(participant_name: str) -> None:
             )
         )
 
-        # Large colored points on top of the line
         points = (
             alt.Chart(participant_submissions)
-            .mark_point(filled=True, size=150)  # size controls how big the dots are
+            .mark_point(filled=True, size=150)
             .encode(
                 x="submission_time:T",
                 y="accuracy:Q",
@@ -385,23 +410,16 @@ def plot_submissions(participant_name: str) -> None:
             )
         )
 
-        # Layer line + points
         chart = alt.layer(line, points).interactive()
-
         st.altair_chart(chart, width="stretch")
     elif len(participant_submissions):
-        st.success(
-            "First submission recorded! Submit more models to see your progress chart.",
-        )
+        st.success("First submission recorded! Submit more models to see your progress chart.")
 
 
 @st.fragment(run_every=10)
 def show_leaderboard() -> None:
-    """Displays the interactive leaderboard with toggle logic."""
     if st.session_state.batch == "anonymous":
-        st.info(
-            "You are currently in an anonymous session. You won't see or appear on any public leaderboards.",
-        )
+        st.info("You are currently in an anonymous session. You won't see or appear on any public leaderboards.")
         return
 
     store = get_global_store()
@@ -421,10 +439,7 @@ def show_leaderboard() -> None:
             submissions_df,
             reduce_leaderboard=reduce_leaderboard,
         )
-        st.dataframe(
-            view.drop("batch", axis=1, errors="ignore"),
-            width="stretch",
-        )
+        st.dataframe(view.drop("batch", axis=1, errors="ignore"), width="stretch")
     else:
         st.write("No submissions yet for this batch.")
 
@@ -446,7 +461,87 @@ def show_leaderboard() -> None:
         st.dataframe(at_view, width="stretch")
 
 
-# ==== MAIN ====
+def render_html_metric_banner(score, baseline_score, label):
+    diff = score - baseline_score
+    if diff > 0.05:
+        color = "#155724"
+        bg = "#d4edda"
+    elif diff >= -0.015:
+        color = "#28a745"
+        bg = "#e2f0d9"
+    elif diff >= -0.035:
+        color = "#ffc107"
+        bg = "#fff3cd"
+    elif diff >= -0.075:
+        color = "#fd7e14"
+        bg = "#ffe8d6"
+    else:
+        color = "#dc3545"
+        bg = "#f8d7da"
+
+    st.markdown(
+        f"""
+        <div style="background-color:{bg}; padding:12px; border-radius:5px; border-left:5px solid {color}; margin-bottom:10px;">
+            <h4 style="margin:0 0 5px 0; color:#333;">{label}</h4>
+            <p style="margin:0; font-size:18px; font-weight:bold; color:{color};">
+                Total Accuracy: {score:.2%}
+                <br>
+                ({diff:+.2%} vs Baseline)
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_matrix_and_metric(y_true, y_pred, label, score, baseline_score):
+    if not y_true or not y_pred:
+        st.warning(f"⚠️ No samples available to compile data evaluation matrix for: {label}")
+        return
+
+    render_html_metric_banner(score, baseline_score, label)
+
+    fig, ax = plt.subplots(figsize=(2, 2), facecolor="black")
+    cm = confusion_matrix(y_true, y_pred)
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="copper",
+        xticklabels=CLASS_NAMES,
+        yticklabels=CLASS_NAMES,
+        ax=ax,
+        cbar=False,
+        annot_kws={"color": "white", "fontsize": 8},
+    )
+    ax.set_xlabel("Predicted", color="white", fontsize=8)
+    ax.set_ylabel("True Label", color="white", fontsize=8)
+    ax.tick_params(colors="white", labelsize=8, which="both", length=0)
+    st.pyplot(fig, width="content")
+    plt.close(fig)
+
+
+def run_evaluation_process(model_path, model_type, apply_preprocess, flip_val, rot_val, zoom_val="normal"):
+    results_path = tempfile.NamedTemporaryFile(suffix=".json", delete=False).name
+    try:
+        process = subprocess.run([
+            sys.executable, "evaluator.py",
+            "--model_path", model_path,
+            "--model_type", model_type,
+            "--apply_preprocess", str(apply_preprocess),
+            "--flip", flip_val,
+            "--rotate", rot_val,
+            "--zoom", zoom_val,
+            "--output_json", results_path
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        if process.returncode != 0:
+            raise RuntimeError(f"Subprocess failed: {process.stderr}")
+
+        with open(results_path, "r") as f:
+            return json.load(f)
+    finally:
+        Path(results_path).unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -461,18 +556,17 @@ def main() -> None:
     state_inits()
     get_participant_info()
 
+    store = get_global_store()
+
     if st.session_state.user_name and st.session_state.batch:
         st.subheader("📤 Submit Your Model", anchor=False)
-        cols = st.columns(
-                2,
-                gap="large",
-            )
+        cols = st.columns(2, gap="large")
         with cols[0]:
             model_type = st.selectbox(
                 "Select the exact model used:",
-                options=ALLOWED_MODELS, # Now shows specific models
+                options=ALLOWED_MODELS,
                 index=None,
-                help="Note: Large models (ConvNeXt, EfficientNetL, etc.) are disabled for stability."
+                help="Note: Large models are disabled for stability."
             )
         with cols[1]:
             apply_preprocess = st.radio(
@@ -481,169 +575,496 @@ def main() -> None:
                 index=0,
                 help=help_preprocessing,
             ) == "No"
+
         if model_type:
             uploaded_file = st.file_uploader("Select a Keras model file", type=["keras"])
 
             if uploaded_file:
-                file_hash = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
-                if st.session_state.get("last_processed_hash") != file_hash:
-                    st.session_state.last_processed_hash = file_hash
+                file_bytes = uploaded_file.getvalue()
+                file_hash = hashlib.sha256(file_bytes).hexdigest()
+                file_size_mb = len(file_bytes) / (1024 * 1024)
 
-                    store = get_global_store()
-                    now = time.time()
-                    TIMEOUT_SECONDS = 300
-                    waiting_placeholder = st.empty()
-                    while store["is_evaluating"]:
-                        start_time = store.get("eval_start_time")
-                        if start_time and (now - start_time) > TIMEOUT_SECONDS:
-                            waiting_placeholder.info("⚠️ Previous evaluation timed out or crashed. Recovering...")
-                            break
-                        waiting_placeholder.warning(
-                            "⏳ Another user is currently evaluating a model. "
-                            "Please wait, your evaluation will start automatically when the server is free..."
+                if st.session_state.get("last_processed_hash") != file_hash:
+                    logger.info(
+                        f"{model_type} uploaded successfully. Size: {file_size_mb:.2f} MB",
+                        extra={"user": st.session_state.user_name, "comp": "UPLOADER"},
+                    )
+                    st.session_state.last_processed_hash = file_hash
+                    st.session_state.baseline_run_data = None
+                    st.session_state.deep_handedness_data = None
+                    st.session_state.deep_perp_data = None
+                    st.session_state.deep_zoom_data = None
+                    st.session_state.deep_inversion_data = None
+
+                    # Polling State Waitlist Initializations
+                    st.session_state.waiting_for_baseline = False
+                    st.session_state.trigger_baseline_eval = False
+                    st.session_state.waiting_for_handedness = False
+                    st.session_state.trigger_handedness_eval = False
+                    st.session_state.waiting_for_perp = False
+                    st.session_state.trigger_perp_eval = False
+                    st.session_state.waiting_for_inversion = False
+                    st.session_state.trigger_inversion_eval = False
+                    st.session_state.waiting_for_zoom = False
+                    st.session_state.trigger_zoom_eval = False
+
+                if st.session_state.get("baseline_run_data") is None:
+                    # ---- BASELINE NON-BLOCKING POLLING STATE VALVE ----
+                    if st.session_state.get("waiting_for_baseline", False):
+                        if store["eval_lock"].locked():
+                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically...")
+                            time.sleep(20)
+                            st.rerun()
+                        else:
+                            st.session_state.waiting_for_baseline = False
+                            st.session_state.trigger_baseline_eval = True
+                            st.rerun()
+
+                    # Intercept execution thread if lock is currently held
+                    if store["eval_lock"].locked() and not st.session_state.get("trigger_baseline_eval", False):
+                        logger.warning(
+                            f"User is waitlisted.",
+                            extra={"user": st.session_state.user_name, "comp": "BASELINE"},
                         )
-                        time.sleep(5)
-                        now = time.time()
-                    store["is_evaluating"] = True
-                    store["eval_start_time"] = time.time()
-                    waiting_placeholder.empty()
+                        st.session_state.waiting_for_baseline = True
+                        st.rerun()
+
+                    st.session_state.trigger_baseline_eval = False
+
                     try:
-                        with st.spinner("Analyzing model performance..."):  # noqa: SIM117
+                        with st.spinner("Analyzing model performance..."):
                             with tempfile.NamedTemporaryFile(suffix=".keras", delete=False) as tmpf:
                                 tmpf.write(uploaded_file.getbuffer())
-                                model_path = tmpf.name
+                                saved_model_path = tmpf.name
 
-                            uploaded_file = None
-                            gc.collect()
+                            st.session_state.saved_model_path = saved_model_path
 
-                            try:
-
-                                results_path = tempfile.NamedTemporaryFile(
-                                    suffix=".json",
-                                    delete=False,
-                                ).name
-
-                                progress_path = results_path.replace(".json", "_progress.json")
-
-                                process = subprocess.Popen(
-                                    [
-                                        sys.executable,
-                                        "evaluator.py",
-                                        model_path,
-                                        model_type,
-                                        str(apply_preprocess),
-                                        results_path,
-                                        progress_path,
-                                    ],
-                                    stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE,
-                                    text=True,
+                            logger.info(
+                                f"Evaluation started: {model_type}",
+                                extra={"user": st.session_state.user_name, "comp": "BASELINE"},
+                            )
+                            with store["eval_lock"]:
+                                baseline_run = run_evaluation_process(
+                                    saved_model_path, model_type, apply_preprocess, "False", "0"
                                 )
+                            st.session_state.baseline_run_data = baseline_run
 
-                                progress_bar = st.progress(0)
-                                status_text = st.empty()
-
-                                status_text.info("Loading model...")
-
-                                while process.poll() is None:
-
-                                    if Path(progress_path).exists():
-                                        try:
-                                            try:
-                                                with open(progress_path, "r") as f:
-                                                    progress = json.load(f)
-                                            except (json.JSONDecodeError, FileNotFoundError):
-                                                continue
-
-                                            progress_bar.progress(progress["progress"])
-
-                                            status_text.write(
-                                                f"Image {progress['done']}/{progress['total']} "
-                                                f"| Current accuracy: {progress['accuracy']:.2%}"
-                                            )
-
-                                        except Exception:
-                                            pass
-
-                                    time.sleep(0.5)
-
-                                stdout, stderr = process.communicate()
-                                progress_bar.progress(1.0)
-                                status_text.success("Evaluation complete!")
-
-                                if process.returncode != 0:
-                                    st.code(stderr)
-                                    raise RuntimeError("Evaluation failed")
-
-                                with open(results_path) as f:
-                                    results = json.load(f)
-
-                                acc = results["accuracy"]
-
-                                y_pred = np.array(results["y_pred"])
-                                y_test = np.array(results["y_true"])
-
-                                result = pd.DataFrame(
-                                    [
-                                        {
-                                            "accuracy": round(acc, 4),
-                                            "participant": st.session_state.user_name,
-                                            "batch": st.session_state.batch,
-                                            "submission_time": pd.Timestamp.now().isoformat(),
-                                            "model_type": model_type,
-                                        },
-                                    ],
-                                )
-
-                                update_submissions(result)
-                                st.success(f"Success! Model Accuracy: {acc:.2%}")
-                                st.subheader("🧮 Confusion Matrix")
-                                fig, ax = plt.subplots(
-                                    figsize=(2, 2), facecolor="black",
-                                )
-                                cm = confusion_matrix(y_test, y_pred)
-                                sns.heatmap(
-                                    cm,
-                                    annot=True,
-                                    fmt="d",
-                                    cmap="copper",
-                                    xticklabels=CLASS_NAMES,
-                                    yticklabels=CLASS_NAMES,
-                                    ax=ax,
-                                    cbar=False,
-                                    annot_kws={"color": "white", "fontsize": 8},
-                                )
-                                ax.set_xlabel("Predicted", color="white")
-                                ax.set_ylabel("True Label", color="white")
-                                ax.tick_params(colors="white", labelsize=8)
-                                ax.tick_params(
-                                    which="both",
-                                    length=0,
-                                )
-                                st.pyplot(fig, width="content")
-                                plt.close(fig)
-
-                                gc.collect()
-                                Path(model_path).unlink(missing_ok=True)
-                                Path(results_path).unlink(missing_ok=True)
-                            except Exception as e:
-                                st.error(f"Error evaluating model: {e}")
-                                gc.collect()
-                    except:
-                        pass
+                            acc = baseline_run["overall_accuracy"]
+                            result = pd.DataFrame([
+                                {
+                                    "accuracy": round(acc, 4),
+                                    "participant": st.session_state.user_name,
+                                    "batch": st.session_state.batch,
+                                    "submission_time": pd.Timestamp.now().isoformat(),
+                                    "model_type": model_type,
+                                },
+                            ])
+                            update_submissions(result)
+                            logger.info(
+                                f"Completed. Accuracy: {acc:.4f}",
+                                extra={"user": st.session_state.user_name, "comp": "BASELINE"},
+                            )
+                        st.rerun()
+                    except Exception as e:
+                        logger.error(
+                            f"Baseline evaluation failed: {str(e)}",
+                            extra={"user": st.session_state.user_name, "comp": "BASELINE"},
+                        )
+                        st.error(f"Error evaluating model baseline: {e}")
                     finally:
-                        store["is_evaluating"] = False
-                        store["eval_start_time"] = None
+                        uploaded_file = None
                         gc.collect()
-                        if 'model_path' in locals():
-                            Path(model_path).unlink(missing_ok=True)
-                        if 'results_path' in locals():
-                            Path(results_path).unlink(missing_ok=True)
-                        if 'progress_path' in locals():
-                            Path(progress_path).unlink(missing_ok=True)
+
+                if st.session_state.get("baseline_run_data") is not None:
+                    baseline_run = st.session_state.baseline_run_data
+                    acc = baseline_run["overall_accuracy"]
+                    y_pred = [pred["y_pred"] for pred in baseline_run["predictions"].values()]
+                    y_test = [pred["y_true"] for pred in baseline_run["predictions"].values()]
+
+                    st.success(f"Success! Model Accuracy: {acc:.2%}")
+
+                    st.subheader("🧮 Confusion Matrix")
+                    fig, ax = plt.subplots(figsize=(2, 2), facecolor="black")
+                    cm = confusion_matrix(y_test, y_pred)
+                    sns.heatmap(
+                        cm,
+                        annot=True,
+                        fmt="d",
+                        cmap="copper",
+                        xticklabels=CLASS_NAMES,
+                        yticklabels=CLASS_NAMES,
+                        ax=ax,
+                        cbar=False,
+                        annot_kws={"color": "white", "fontsize": 8},
+                    )
+                    ax.set_xlabel("Predicted", color="white", fontsize=8)
+                    ax.set_ylabel("True Label", color="white", fontsize=8)
+                    ax.tick_params(colors="white", labelsize=8, which="both", length=0)
+                    st.pyplot(fig, width="content")
+                    plt.close(fig)
+
+                    gc.collect()
 
         plot_submissions(st.session_state.user_name)
         show_leaderboard()
+
+        # ==== ADVANCED DIAGNOSTICS CONTROL CENTER PANEL ====
+        if st.session_state.get("baseline_run_data") is not None:
+            st.divider()
+
+            show_diagnostics = st.toggle("🔍 Show Advanced Diagnostic Robustness Stress-Testing", value=False)
+
+            if show_diagnostics:
+                st.header("🔍 Advanced Diagnostic: Robustness Stress-Testing", anchor=False)
+                st.write("Analyze your network's vulnerabilities against variance in "
+                         "handedness, horizontal hand orientations, "
+                         "total canvas inversions, and scaling.")
+
+                saved_model_path = st.session_state.saved_model_path
+                baseline_run = st.session_state.baseline_run_data
+                acc = baseline_run["overall_accuracy"]
+
+                # --- STEP 1: HANDEDNESS INVARIANT VERIFICATION ---
+                st.markdown("### 🖐️ Handedness Invariant Verification")
+                if st.session_state.get("deep_handedness_data") is None:
+                    # ---- HANDEDNESS NON-BLOCKING POLLING AUTOMATION VALVE ----
+                    if st.session_state.get("waiting_for_handedness", False):
+                        if store["eval_lock"].locked():
+                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically...")
+                            time.sleep(20)
+                            st.rerun()
+                        else:
+                            st.session_state.waiting_for_handedness = False
+                            st.session_state.trigger_handedness_eval = True
+                            st.rerun()
+
+                    if st.button("Evaluate Handedness Robustness") or st.session_state.get("trigger_handedness_eval", False):
+                        if store["eval_lock"].locked() and not st.session_state.get("trigger_handedness_eval", False):
+                            logger.warning(
+                                f"User is waitlisted.",
+                                extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"}
+                            )
+                            st.session_state.waiting_for_handedness = True
+                            st.rerun()
+
+                        st.session_state.trigger_handedness_eval = False
+                        progress_bar = st.progress(0)
+                        status_text = st.info("Running Handedness matrix configuration...")
+                        
+                        logger.info(
+                            f"Evaluation started: {model_type}",
+                            extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"},
+                        )
+                        with store["eval_lock"]:
+                            flipped_0 = run_evaluation_process(saved_model_path, model_type, apply_preprocess, "True", "0")
+                        
+                        progress_bar.progress(1.0)
+                        status_text.empty()
+                        progress_bar.empty()
+                        st.session_state.deep_handedness_data = {"flipped_0": flipped_0}
+                        logger.info(
+                            f"Completed.",
+                            extra={"user": st.session_state.user_name, "comp": "HANDEDNESS"},
+                        )
+                        st.rerun()
+                else:
+                    handedness_slices = st.session_state.deep_handedness_data
+                    left_y_true, left_y_pred = [], []
+                    right_y_true, right_y_pred = [], []
+
+                    real_left_true, real_left_pred = [], []
+                    sim_left_true, sim_left_pred = [], []
+                    real_right_true, real_right_pred = [], []
+                    sim_right_true, sim_right_pred = [], []
+
+                    base_left_total, base_left_correct = 0, 0
+                    base_right_total, base_right_correct = 0, 0
+
+                    for fname, p in baseline_run["predictions"].items():
+                        hand = str(p.get("native_handedness", "Unknown")).strip().capitalize()
+                        if hand == "Left":
+                            left_y_true.append(p["y_true"])
+                            left_y_pred.append(p["y_pred"])
+                            real_left_true.append(p["y_true"])
+                            real_left_pred.append(p["y_true"])
+                            real_left_pred[-1] = p["y_pred"]
+                            base_left_total += 1
+                            if p["correct"]: base_left_correct += 1
+                        elif hand == "Right":
+                            right_y_true.append(p["y_true"])
+                            right_y_pred.append(p["y_pred"])
+                            real_right_true.append(p["y_true"])
+                            real_right_pred.append(p["y_true"])
+                            real_right_pred[-1] = p["y_pred"]
+                            base_right_total += 1
+                            if p["correct"]: base_right_correct += 1
+
+                    for fname, p in handedness_slices["flipped_0"]["predictions"].items():
+                        hand = str(p.get("native_handedness", "Unknown")).strip().capitalize()
+                        if hand == "Left":
+                            right_y_true.append(p["y_true"])
+                            right_y_pred.append(p["y_pred"])
+                            sim_right_true.append(p["y_true"])
+                            sim_right_pred.append(p["y_pred"])
+                        elif hand == "Right":
+                            left_y_true.append(p["y_true"])
+                            left_y_pred.append(p["y_pred"])
+                            sim_left_true.append(p["y_true"])
+                            sim_left_pred.append(p["y_pred"])
+
+                    left_acc = np.mean(np.array(left_y_true) == np.array(left_y_pred)) if left_y_true else 0.0
+                    right_acc = np.mean(np.array(right_y_true) == np.array(right_y_pred)) if right_y_true else 0.0
+
+                    real_left_acc = np.mean(np.array(real_left_true) == np.array(real_left_pred)) if real_left_true else 0.0
+                    sim_left_acc = np.mean(np.array(sim_left_true) == np.array(sim_left_pred)) if sim_left_true else 0.0
+                    real_right_acc = np.mean(np.array(real_right_true) == np.array(real_right_pred)) if real_right_true else 0.0
+                    sim_right_acc = np.mean(np.array(sim_right_true) == np.array(sim_right_pred)) if sim_right_true else 0.0
+
+                    col_h1, col_h2 = st.columns(2)
+                    with col_h1:
+                        render_matrix_and_metric(
+                            left_y_true, left_y_pred, "Left-Handed Images", left_acc, acc
+                        )
+                        st.caption(f"• Real Left-Handed Samples: **{real_left_acc:.2%}** ({base_left_correct}/{base_left_total})")
+                        st.caption(f"• Simulated Left-Handed Samples (Flipped Rights): **{sim_left_acc:.2%}**")
+                    with col_h2:
+                        render_matrix_and_metric(
+                            right_y_true, right_y_pred, "Right-Handed Images", right_acc, acc
+                        )
+                        st.caption(f"• Real Right-Handed Samples: **{real_right_acc:.2%}** ({base_right_correct}/{base_right_total})")
+                        st.caption(f"• Simulated Right-Handed Samples (Flipped Lefts): **{sim_right_acc:.2%}**")
+
+                # --- STEP 2: HORIZONTAL ORIENTATIONS OF HANDS ---
+                st.write("")
+                st.markdown("### 🫱 Horizontal Orientations of Hands (90° & -90°)")
+                if st.session_state.get("deep_perp_data") is None:
+                    # ---- HORIZONTAL ORIENTATIONS NON-BLOCKING POLLING AUTOMATION VALVE ----
+                    if st.session_state.get("waiting_for_perp", False):
+                        if store["eval_lock"].locked():
+                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically...")
+                            time.sleep(20)
+                            st.rerun()
+                        else:
+                            st.session_state.waiting_for_perp = False
+                            st.session_state.trigger_perp_eval = True
+                            st.rerun()
+
+                    if st.button("Evaluate Perpendicular Robustness") or st.session_state.get("trigger_perp_eval", False):
+                        if store["eval_lock"].locked() and not st.session_state.get("trigger_perp_eval", False):
+                            logger.warning(
+                                f"User is waitlisted.",
+                                extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"},
+                            )
+                            st.session_state.waiting_for_perp = True
+                            st.rerun()
+
+                        st.session_state.trigger_perp_eval = False
+                        perp_configs = [
+                            ("unflipped_90", "False", "90"),
+                            ("unflipped_270", "False", "270"),
+                            ("flipped_90", "True", "90"),
+                            ("flipped_270", "True", "270")
+                        ]
+                        slices_p = {}
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+
+                        logger.info(
+                            f"Evaluation started: {model_type}",
+                            extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"},
+                        )
+                        with store["eval_lock"]:
+                            for idx, (s_name, f_v, r_v) in enumerate(perp_configs):
+                                status_text.info(f"Processing evaluation slice [{idx + 1}/{len(perp_configs)}]: Flip={f_v}, Rotate={r_v}°")
+                                slices_p[s_name] = run_evaluation_process(saved_model_path, model_type, apply_preprocess, f_v, r_v)
+                                progress_bar.progress((idx + 1) / len(perp_configs))
+
+                        status_text.empty()
+                        progress_bar.empty()
+                        st.session_state.deep_perp_data = slices_p
+                        logger.info(
+                            f"Completed.",
+                            extra={"user": st.session_state.user_name, "comp": "HORIZ_ROT"}
+                        )
+                        st.rerun()
+                else:
+                    perp_slices = st.session_state.deep_perp_data
+                    rot_p90_true, rot_p90_pred = [], []
+                    for run in [perp_slices["unflipped_90"], perp_slices["flipped_90"]]:
+                        for p in run["predictions"].values():
+                            rot_p90_true.append(p["y_true"])
+                            rot_p90_pred.append(p["y_pred"])
+                    rot_p90_acc = np.mean(np.array(rot_p90_true) == np.array(rot_p90_pred)) if rot_p90_true else 0.0
+
+                    rot_n90_true, rot_n90_pred = [], []
+                    for run in [perp_slices["unflipped_270"], perp_slices["flipped_270"]]:
+                        for p in run["predictions"].values():
+                            rot_n90_true.append(p["y_true"])
+                            rot_n90_pred.append(p["y_pred"])
+                    rot_n90_acc = np.mean(np.array(rot_n90_true) == np.array(rot_n90_pred)) if rot_n90_true else 0.0
+
+                    rot_90_270_true = rot_p90_true + rot_n90_true
+                    rot_90_270_pred = rot_p90_pred + rot_n90_pred
+                    rot_90_270_acc = np.mean(np.array(rot_90_270_true) == np.array(rot_90_270_pred)) if rot_90_270_true else 0.0
+
+                    render_html_metric_banner(rot_90_270_acc, acc, "Combined Accuracy")
+
+                    col_r1, col_r2 = st.columns(2)
+                    with col_r1:
+                        render_matrix_and_metric(
+                            rot_p90_true, rot_p90_pred, "Clockwise (+90°)", rot_p90_acc, acc
+                        )
+                    with col_r2:
+                        render_matrix_and_metric(
+                            rot_n90_true, rot_n90_pred, "Counter-Clockwise (-90°)", rot_n90_acc, acc
+                        )
+
+                # --- STEP 3: UPSIDE-DOWN HANDS ---
+                st.write("")
+                st.markdown("### 🙃 Upside-down Hands")
+                if st.session_state.get("deep_inversion_data") is None:
+                    # ---- INVERSION NON-BLOCKING POLLING AUTOMATION VALVE ----
+                    if st.session_state.get("waiting_for_inversion", False):
+                        if store["eval_lock"].locked():
+                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically...")
+                            time.sleep(20)
+                            st.rerun()
+                        else:
+                            st.session_state.waiting_for_inversion = False
+                            st.session_state.trigger_inversion_eval = True
+                            st.rerun()
+
+                    if st.button("Evaluate Inversion Robustness") or st.session_state.get("trigger_inversion_eval", False):
+                        if store["eval_lock"].locked() and not st.session_state.get("trigger_inversion_eval", False):
+                            logger.warning(
+                                f"User is waitlisted.",
+                                extra={"user": st.session_state.user_name, "comp": "INVERSION"}
+                            )
+                            st.session_state.waiting_for_inversion = True
+                            st.rerun()
+
+                        st.session_state.trigger_inversion_eval = False
+                        inv_configs = [
+                            ("unflipped_180", "False", "180"),
+                            ("flipped_180", "True", "180")
+                        ]
+                        slices_i = {}
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+
+                        logger.info(
+                            f"Evaluation started: {model_type}",
+                            extra={"user": st.session_state.user_name, "comp": "INVERSION"},
+                        )
+                        with store["eval_lock"]:
+                            for idx, (s_name, f_v, r_v) in enumerate(inv_configs):
+                                status_text.info(f"Processing evaluation slice [{idx + 1}/{len(inv_configs)}]: Flip={f_v}, Rotate={r_v}°")
+                                slices_i[s_name] = run_evaluation_process(saved_model_path, model_type, apply_preprocess, f_v, r_v)
+                                progress_bar.progress((idx + 1) / len(inv_configs))
+
+                        status_text.empty()
+                        progress_bar.empty()
+                        st.session_state.deep_inversion_data = slices_i
+                        logger.info(
+                            f"Completed.",
+                            extra={"user": st.session_state.user_name, "comp": "INVERSION"},
+                        )
+                        st.rerun()
+                else:
+                    inv_slices = st.session_state.deep_inversion_data
+                    rot_180_true, rot_180_pred = [], []
+                    for run in [inv_slices["unflipped_180"], inv_slices["flipped_180"]]:
+                        for p in run["predictions"].values():
+                            rot_180_true.append(p["y_true"])
+                            rot_180_pred.append(p["y_pred"])
+                    rot_180_acc = np.mean(np.array(rot_180_true) == np.array(rot_180_pred)) if rot_180_true else 0.0
+
+                    col_r1, col_r2 = st.columns(2)
+                    with col_r1:
+                        render_matrix_and_metric(
+                            rot_180_true, rot_180_pred, "Upside-Down Accuracy", rot_180_acc, acc
+                        )
+
+                # --- STEP 4: DISTANCE & FRAMING INVARIANCE (ZOOM) ---
+                st.write("")
+                st.markdown("### 📏 Distance & Framing Invariance (Scale/Zoom)")
+                if st.session_state.get("deep_zoom_data") is None:
+                    # ---- ZOOM NON-BLOCKING POLLING AUTOMATION VALVE ----
+                    if st.session_state.get("waiting_for_zoom", False):
+                        if store["eval_lock"].locked():
+                            st.warning("⏳ Server busy: Another user is running evaluations. Retrying automatically...")
+                            time.sleep(20)
+                            st.rerun()
+                        else:
+                            st.session_state.waiting_for_zoom = False
+                            st.session_state.trigger_zoom_eval = True
+                            st.rerun()
+
+                    if st.button("Evaluate Scale Robustness") or st.session_state.get("trigger_zoom_eval", False):
+                        if store["eval_lock"].locked() and not st.session_state.get("trigger_zoom_eval", False):
+                            logger.warning(
+                                f"User is waitlisted.",
+                                extra={"user": st.session_state.user_name, "comp": "ZOOM"},
+                            )
+                            st.session_state.waiting_for_zoom = True
+                            st.rerun()
+
+                        st.session_state.trigger_zoom_eval = False
+                        zoom_configs = [
+                            ("zoomed_in", "in"),
+                            ("zoomed_out", "out")
+                        ]
+                        slices_z = {}
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+
+                        logger.info(
+                            f"Evaluation started: {model_type}",
+                            extra={"user": st.session_state.user_name, "comp": "ZOOM"},
+                        )
+                        with store["eval_lock"]:
+                            for idx, (s_name, zoom_flag) in enumerate(zoom_configs):
+                                status_text.info(f"Processing scaling evaluation matrix [{idx + 1}/{len(zoom_configs)}]: Zoom Mode='{zoom_flag}'")
+                                slices_z[s_name] = run_evaluation_process(saved_model_path, model_type, apply_preprocess, "False", "0", zoom_flag)
+                                progress_bar.progress((idx + 1) / len(zoom_configs))
+
+                        status_text.empty()
+                        progress_bar.empty()
+                        st.session_state.deep_zoom_data = slices_z
+                        logger.info(
+                            f"Completed.",
+                            extra={"user": st.session_state.user_name, "comp": "ZOOM"},
+                        )
+                        st.rerun()
+                else:
+                    zoom_slices = st.session_state.deep_zoom_data
+                    zin_true, zin_pred = [], []
+                    for p in zoom_slices["zoomed_in"]["predictions"].values():
+                        zin_true.append(p["y_true"])
+                        zin_pred.append(p["y_pred"])
+                    zin_acc = np.mean(np.array(zin_true) == np.array(zin_pred)) if zin_true else 0.0
+
+                    zout_true, zout_pred = [], []
+                    for p in zoom_slices["zoomed_out"]["predictions"].values():
+                        zout_true.append(p["y_true"])
+                        zout_pred.append(p["y_pred"])
+                    zout_acc = np.mean(np.array(zout_true) == np.array(zout_pred)) if zout_true else 0.0
+
+                    total_zoom_true = zin_true + zout_true
+                    total_zoom_pred = zin_pred + zout_pred
+                    total_zoom_acc = np.mean(np.array(total_zoom_true) == np.array(total_zoom_pred)) if total_zoom_true else 0.0
+
+                    render_html_metric_banner(total_zoom_acc, acc, "Combined Framing Invariance Accuracy")
+
+                    col_z1, col_z2 = st.columns(2)
+                    with col_z1:
+                        render_matrix_and_metric(
+                            zin_true, zin_pred, "Zoomed-In (Close Framing)", zin_acc, acc
+                        )
+                    with col_z2:
+                        render_matrix_and_metric(
+                            zout_true, zout_pred, "Zoomed-Out (Distant Framing)", zout_acc, acc
+                        )
 
 
 if __name__ == "__main__":
