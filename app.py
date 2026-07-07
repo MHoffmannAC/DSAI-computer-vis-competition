@@ -264,7 +264,16 @@ def generate_leaderboard_dataframe(
         )
         .sort_values(["accuracy", "submission_time"], ascending=[False, True])
         .drop_duplicates(subset=groupby, keep="first")
-        .assign(position=lambda df_: range(1, len(df_) + 1))
+        .assign(
+            position=lambda df_: df_["accuracy"]
+            .rank(method="min", ascending=False)
+            .astype(int)
+        )
+        .assign(
+            position=lambda df_: df_["position"]
+            .where(df_["position"].ne(df_["position"].shift()), "")
+            .astype(str)
+        )
         .set_index("position")
         .filter(["participant", "batch", "model_type", "accuracy", "attempts"])
     )
